@@ -51,8 +51,13 @@ PEDESTAL_FOOTPRINT_RATIO = 0.55
 PLATE_OBJ = """# Unit plate for a QR target station.
 # A 1x1 quad in the XY plane facing +Z, with explicit UVs so the texture
 # mapping is identical in every renderer. Scaled to the plate size by the SDF.
+#
+# Winding: v1..v4 run counter-clockwise seen from +Z and UV (0,0) is the image
+# bottom-left, so texture-right x texture-up == +normal and the code is NOT
+# mirrored. A mirrored QR moves its third finder pattern to the bottom-right
+# and is unreadable by OpenCV < 4.7.
 mtllib plate.mtl
-o qr_plate
+o qr_plate_{slug}
 v -0.5 -0.5 0.0
 v  0.5 -0.5 0.0
 v  0.5  0.5 0.0
@@ -62,17 +67,22 @@ vt 1.0 0.0
 vt 1.0 1.0
 vt 0.0 1.0
 vn 0.0 0.0 1.0
-usemtl qr_material
+usemtl {material}
 f 1/1/1 2/2/1 3/3/1 4/4/1
 """
 
-PLATE_MTL = """newmtl qr_material
+# The material name and the texture filename must both be unique per station.
+# Ogre (and therefore gz-rendering) caches materials and textures by *name*, so
+# three stations sharing "qr_material" / "qr.png" all end up displaying
+# whichever one was loaded first - every station shows the same code, and the
+# world model correctly but uselessly reports DUPLICATE_QR.
+PLATE_MTL = """newmtl {material}
 Ka 1.000 1.000 1.000
 Kd 1.000 1.000 1.000
 Ks 0.000 0.000 0.000
 d 1.0
 illum 1
-map_Kd ../materials/textures/qr.png
+map_Kd ../materials/textures/{texture}
 """
 
 MODEL_CONFIG = """<?xml version="1.0"?>
@@ -209,13 +219,21 @@ def generate(config_path: Path, output_dir: Path, texture_px: int) -> int:
         (model_dir / "meshes").mkdir(parents=True, exist_ok=True)
         (model_dir / "materials" / "textures").mkdir(parents=True, exist_ok=True)
 
+        slug = payload.lower()
+        material = f"qr_material_{slug}"
+        texture_name = f"qr_{slug}.png"
+
         texture = render_qr_image(payload, texture_px, quiet)
-        texture_path = model_dir / "materials" / "textures" / "qr.png"
+        texture_path = model_dir / "materials" / "textures" / texture_name
         if not cv2.imwrite(str(texture_path), texture):
             raise RuntimeError(f"failed to write {texture_path}")
 
-        (model_dir / "meshes" / "plate.obj").write_text(PLATE_OBJ, encoding="utf-8")
-        (model_dir / "meshes" / "plate.mtl").write_text(PLATE_MTL, encoding="utf-8")
+        (model_dir / "meshes" / "plate.obj").write_text(
+            PLATE_OBJ.format(slug=slug, material=material), encoding="utf-8"
+        )
+        (model_dir / "meshes" / "plate.mtl").write_text(
+            PLATE_MTL.format(material=material, texture=texture_name), encoding="utf-8"
+        )
         (model_dir / "model.sdf").write_text(
             build_model_sdf(model_name, payload, plate_size), encoding="utf-8"
         )
@@ -235,7 +253,8 @@ def generate(config_path: Path, output_dir: Path, texture_px: int) -> int:
         print(
             f"{model_name:26s} payload={payload:9s} texture={texture.shape[0]}px "
             f"modules={modules} code_side={code:.4f} m "
-            f"({code / plate_size:.4f} of the {plate_size:.2f} m plate)"
+            f"({code / plate_size:.4f} of the {plate_size:.2f} m plate) "
+            f"material={material}"
         )
 
     print(f"\nwrote {len(config.mission.known_payloads)} station models to {output_dir}")

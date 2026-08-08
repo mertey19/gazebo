@@ -69,7 +69,7 @@
       <sensor name="down_camera" type="camera">
         <pose>0.10 0 -0.08 0 1.5707963 0</pose>
         <always_on>1</always_on>
-        <update_rate>15</update_rate>
+        <update_rate>6</update_rate>
         <visualize>false</visualize>
         <topic>/drone/camera/image</topic>
         <!-- Pin the published frame_id instead of letting gz derive a scoped
@@ -102,7 +102,7 @@
       <sensor name="down_lidar" type="gpu_lidar">
         <pose>0 0 -0.06 0 0 0</pose>
         <always_on>1</always_on>
-        <update_rate>10</update_rate>
+        <update_rate>5</update_rate>
         <visualize>false</visualize>
         <topic>/drone/scan/points</topic>
         <gz_frame_id>drone/lidar_link</gz_frame_id>

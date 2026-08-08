@@ -61,7 +61,9 @@ drone:
     width: 1280
     height: 960
     horizontal_fov_rad: 1.047
-    update_rate_hz: 15.0
+    # Matches perception.qr_detection_rate_hz below; the detector throttles to
+    # that anyway, and rendering the extra frames dominates cost without a GPU.
+    update_rate_hz: 6.0
 
 rover:
   max_linear_velocity: 0.8
@@ -86,7 +88,7 @@ rover:
     width: 640
     height: 480
     horizontal_fov_rad: 1.20
-    update_rate_hz: 15.0
+    update_rate_hz: 6.0
 
 perception:
   qr_detection_rate_hz: 6.0

@@ -113,6 +113,26 @@ def test_sdf_camera_matches_configuration(sdf_models, config, model, sensor, sec
     assert int(image.find("width").text) == expected.width
     assert int(image.find("height").text) == expected.height
 
+    sensor = find_sensor(sdf_models[model], sensor)
+    assert float(sensor.find("update_rate").text) == pytest.approx(
+        expected.update_rate_hz, abs=1e-6
+    ), "SDF sensor rate and the configured camera rate must agree"
+
+
+def test_camera_rate_is_not_wasted_on_frames_perception_throttles_away(config) -> None:
+    """Rendering faster than the detector consumes is pure cost.
+
+    Without a GPU (CI, or any headless box) camera rendering dominates the
+    simulation's real-time factor, so an over-fast sensor is the difference
+    between a mission that finishes and one that times out.
+    """
+    for section in ("drone", "rover"):
+        rate = getattr(config, section).camera.update_rate_hz
+        assert rate <= config.perception.qr_detection_rate_hz + 1e-9, (
+            f"{section} camera renders at {rate} Hz but perception throttles to "
+            f"{config.perception.qr_detection_rate_hz} Hz"
+        )
+
 
 @pytest.mark.parametrize(
     "model,sensor,frame",
@@ -215,12 +235,95 @@ def test_station_model_exists_with_a_unique_texture(payload: str) -> None:
     assert (model_dir / "meshes" / "plate.obj").is_file()
     assert (model_dir / "meshes" / "plate.mtl").is_file()
 
-    texture = model_dir / "materials" / "textures" / "qr.png"
-    assert texture.is_file()
-    image = cv2.imread(str(texture), cv2.IMREAD_GRAYSCALE)
+    textures = list((model_dir / "materials" / "textures").glob("*.png"))
+    assert len(textures) == 1, f"expected exactly one texture, found {textures}"
+    image = cv2.imread(str(textures[0]), cv2.IMREAD_GRAYSCALE)
     ok, decoded, _, _ = cv2.QRCodeDetector().detectAndDecodeMulti(image)
     assert ok and list(decoded) == [payload], (
-        f"{texture} does not decode to {payload}: {decoded if ok else 'no code found'}"
+        f"{textures[0]} does not decode to {payload}: "
+        f"{decoded if ok else 'no code found'}"
+    )
+
+
+def test_station_materials_and_textures_have_unique_names() -> None:
+    """Ogre caches materials and textures by name, not by path.
+
+    Regression, found only by running in Gazebo: all three stations shipped a
+    material called ``qr_material`` and a texture called ``qr.png``, so
+    whichever loaded first was displayed on all three. Every station showed the
+    same code and the world model - correctly - refused to act on it with
+    DUPLICATE_QR. Names must be unique, not merely the directories holding them.
+    """
+    materials: Dict[str, str] = {}
+    texture_names: Dict[str, str] = {}
+    object_names: Dict[str, str] = {}
+
+    for payload in ("TARGET_1", "TARGET_2", "TARGET_3"):
+        model_dir = BRINGUP / "models" / f"target_station_{payload.lower()}"
+        mtl = (model_dir / "meshes" / "plate.mtl").read_text(encoding="utf-8")
+        obj = (model_dir / "meshes" / "plate.obj").read_text(encoding="utf-8")
+
+        declared = re.findall(r"^newmtl\s+(\S+)", mtl, re.MULTILINE)
+        used = re.findall(r"^usemtl\s+(\S+)", obj, re.MULTILINE)
+        maps = re.findall(r"^map_Kd\s+(\S+)", mtl, re.MULTILINE)
+        objects = re.findall(r"^o\s+(\S+)", obj, re.MULTILINE)
+
+        assert len(declared) == 1 and len(used) == 1 and len(maps) == 1
+        assert used[0] == declared[0], (
+            f"{payload}: the OBJ uses {used[0]!r} but the MTL declares {declared[0]!r}"
+        )
+        assert (model_dir / "meshes" / maps[0]).resolve().is_file(), (
+            f"{payload}: map_Kd points at {maps[0]}, which does not exist"
+        )
+        materials[payload] = declared[0]
+        texture_names[payload] = Path(maps[0]).name
+        object_names[payload] = objects[0] if objects else ""
+
+    for label, mapping in (
+        ("material", materials),
+        ("texture filename", texture_names),
+        ("OBJ object", object_names),
+    ):
+        values = list(mapping.values())
+        assert len(set(values)) == len(values), (
+            f"stations share a {label}: {mapping} - Ogre will show one code on all of them"
+        )
+
+
+def test_plate_mesh_winding_is_not_mirrored() -> None:
+    """The Gazebo plate must satisfy the same handedness rule as the harness.
+
+    UV (0,0) is the image bottom-left in OBJ, so the vertex assigned to it must
+    be the quad's bottom-left for texture-right x texture-up to equal +normal.
+    """
+    obj = (BRINGUP / "models" / "target_station_target_1" / "meshes" / "plate.obj").read_text(
+        encoding="utf-8"
+    )
+    vertices = [
+        [float(v) for v in line.split()[1:4]]
+        for line in obj.splitlines()
+        if line.startswith("v ")
+    ]
+    uvs = [
+        [float(v) for v in line.split()[1:3]]
+        for line in obj.splitlines()
+        if line.startswith("vt ")
+    ]
+    face = re.search(r"^f\s+(.*)$", obj, re.MULTILINE)
+    assert face is not None
+    pairs = [tuple(int(i) - 1 for i in token.split("/")[:2]) for token in face.group(1).split()]
+
+    corner = {tuple(uvs[uv]): np.asarray(vertices[v]) for v, uv in pairs}
+    bottom_left = corner[(0.0, 0.0)]
+    bottom_right = corner[(1.0, 0.0)]
+    top_left = corner[(0.0, 1.0)]
+
+    right = bottom_right - bottom_left
+    up = top_left - bottom_left
+    normal = np.cross(right, up)
+    normal /= np.linalg.norm(normal)
+    assert np.allclose(normal, [0.0, 0.0, 1.0], atol=1e-9), (
+        f"plate.obj texture basis is mirrored: right x up = {normal}, expected +Z"
     )
 
 

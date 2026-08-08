@@ -164,7 +164,7 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           cd ros2_ws
           colcon build --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=Release
-      - name: Launch the mission and check the live pipeline
+      - name: Launch the stack and verify the frames before anything moves
         shell: bash
         run: |
           set -ex
@@ -172,14 +172,11 @@ jobs:
           source ros2_ws/install/setup.bash
           mkdir -p logs
 
-          # Headless: gz server only. Sensors still render, through llvmpipe.
-          xvfb-run -a --server-args="-screen 0 1600x1200x24" \
-            ros2 launch mission_bringup mission.launch.py \
-              target_qr:=${{ matrix.target }} headless:=true rviz:=false \
-              > logs/launch.log 2>&1 &
-          echo $! > logs/launch.pid
+          # auto_start:=false so the vehicles stay at their spawn poses long
+          # enough for the map->odom transforms to be checked against them.
+          # Headless: gz server only; sensors still render, through llvmpipe.
+          xvfb-run -a --server-args="-screen 0 1600x1200x24"             ros2 launch mission_bringup mission.launch.py               target_qr:=${{ matrix.target }} headless:=true rviz:=false               auto_start:=false               > logs/launch.log 2>&1 &
 
-          # Fail fast with a useful message if the stack never comes up.
           for i in $(seq 1 60); do
             if ros2 topic list 2>/dev/null | grep -q /mission/status; then break; fi
             sleep 5
@@ -187,15 +184,19 @@ jobs:
           ros2 node list  | tee logs/nodes.txt
           ros2 topic list | tee logs/topics.txt
 
-          # Which stage of the data path is the first to go quiet?
-          ros2 run mission_bringup check_pipeline.py --timeout 900 | tee logs/pipeline.txt
-      - name: Wait for the mission verdict
+          # Meaningful only while the vehicles are still parked.
+          ros2 run mission_bringup check_frames.py | tee logs/frames.txt
+      - name: Start the mission through the action and watch the pipeline
         shell: bash
         run: |
           set -ex
           source /opt/ros/jazzy/setup.bash
           source ros2_ws/install/setup.bash
-          ros2 run mission_bringup await_mission.py --timeout 2400 | tee logs/mission.txt
+
+          ros2 action send_goal /mission/run_mission             mission_interfaces/action/RunMission "{target_qr: '${{ matrix.target }}'}"             > logs/action.log 2>&1 &
+
+          # Which stage of the data path is the first to go quiet?
+          ros2 run mission_bringup check_pipeline.py --timeout 900 | tee logs/pipeline.txt
       - name: Collect diagnostics
         if: always()
         shell: bash

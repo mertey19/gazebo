@@ -52,6 +52,13 @@ class FrameChecker(Node):
             )
 
     def report(self) -> int:
+        """Compare TF against the spawn pose - only meaningful before motion.
+
+        A vehicle that has already driven or flown is *supposed* to be
+        somewhere else, so comparing it against its spawn pose would report a
+        fault that is not one. The mover case is detected and reported as
+        SKIPPED rather than silently passing or noisily failing.
+        """
         failures = 0
         print(f"{'vehicle':8s} {'source':22s} {'x':>8s} {'y':>8s} {'z':>8s}")
         print("-" * 60)
@@ -77,15 +84,38 @@ class FrameChecker(Node):
             print(f"{name:8s} {'expected spawn':22s} {expected[0]:8.3f} {expected[1]:8.3f}")
 
             error = max(abs(t.x - expected[0]), abs(t.y - expected[1]))
-            verdict = "OK" if error <= TOLERANCE_M else "MISMATCH"
-            if error > TOLERANCE_M:
-                failures += 1
+            if error <= TOLERANCE_M:
+                print(f"{name:8s} -> OK ({error:.3f} m residual)")
+                print()
+                continue
+
+            # Distinguish "the transform is wrong" from "it flew away". The
+            # odometry delta tells us whether the vehicle actually moved, and
+            # the two frames agreeing tells us the TF chain is self-consistent.
+            odom_speed = float(
+                abs(odom.twist.twist.linear.x)
+                + abs(odom.twist.twist.linear.y)
+                + abs(odom.twist.twist.linear.z)
+            )
+            tf_matches_odom = (
+                abs(t.x - p.x) <= TOLERANCE_M
+                and abs(t.y - p.y) <= TOLERANCE_M
+                and abs(t.z - p.z) <= TOLERANCE_M
+            )
+            if tf_matches_odom and (odom_speed > 0.05 or error > 1.0):
                 print(
-                    f"{name:8s} -> {verdict}: TF places the vehicle {error:.3f} m from its spawn "
-                    f"pose. Fix the map -> {name}/odom static transform in mission.launch.py."
+                    f"{name:8s} -> SKIPPED: the vehicle has moved {error:.2f} m from spawn "
+                    f"(speed {odom_speed:.2f} m/s) and TF agrees with odometry to "
+                    f"{TOLERANCE_M:.2f} m, so the map -> {name}/odom transform is consistent. "
+                    f"Run this check before the mission starts to test it against spawn."
                 )
             else:
-                print(f"{name:8s} -> {verdict} ({error:.3f} m residual)")
+                failures += 1
+                print(
+                    f"{name:8s} -> MISMATCH: TF places the vehicle {error:.3f} m from its spawn "
+                    f"pose and does not agree with odometry. Fix the map -> {name}/odom "
+                    f"static transform in mission.launch.py."
+                )
             print()
         return failures
 

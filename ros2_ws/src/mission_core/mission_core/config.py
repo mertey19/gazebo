@@ -41,7 +41,9 @@ class CameraConfig:
     width: int = 1280
     height: int = 960
     horizontal_fov_rad: float = 1.047
-    update_rate_hz: float = 15.0
+    #: Matches perception.qr_detection_rate_hz: rendering frames the detector
+    #: throttles away is wasted work, and dominates cost without a GPU.
+    update_rate_hz: float = 6.0
 
 
 @dataclass(frozen=True)

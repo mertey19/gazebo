@@ -76,7 +76,7 @@
       <sensor name="front_camera" type="camera">
         <pose>0.22 0 0.55 0 0 0</pose>
         <always_on>1</always_on>
-        <update_rate>15</update_rate>
+        <update_rate>6</update_rate>
         <visualize>false</visualize>
         <topic>/rover/camera/image</topic>
         <gz_frame_id>rover/camera_optical_frame</gz_frame_id>
@@ -98,7 +98,7 @@
       <sensor name="safety_lidar" type="gpu_lidar">
         <pose>0.24 0 0.30 0 0 0</pose>
         <always_on>1</always_on>
-        <update_rate>15</update_rate>
+        <update_rate>8</update_rate>
         <visualize>false</visualize>
         <topic>/rover/scan</topic>
         <gz_frame_id>rover/lidar_link</gz_frame_id>

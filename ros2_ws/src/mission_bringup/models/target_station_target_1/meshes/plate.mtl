@@ -1,7 +1,7 @@
-newmtl qr_material
+newmtl qr_material_target_1
 Ka 1.000 1.000 1.000
 Kd 1.000 1.000 1.000
 Ks 0.000 0.000 0.000
 d 1.0
 illum 1
-map_Kd ../materials/textures/qr.png
+map_Kd ../materials/textures/qr_target_1.png
