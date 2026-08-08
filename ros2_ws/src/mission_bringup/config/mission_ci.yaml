@@ -1,0 +1,30 @@
+# Overrides for a runner with no GPU. Merged onto the shipped defaults, so
+# every value absent here is exactly what config/mission.yaml specifies.
+#
+# Why this file exists
+# --------------------
+# On a GPU-less machine Gazebo renders the 1280x960 drone camera through Mesa's
+# llvmpipe software rasteriser at roughly 1 Hz instead of the configured 6 Hz.
+# A station therefore passes through the camera's footprint in a handful of
+# frames rather than a couple of dozen, and may be seen only once - not enough
+# to reach CONFIRMED, which requires world_model.min_observations sightings.
+#
+# The honest fix is to fly slower, not to lower the bar for what counts as a
+# confirmed target.
+#
+# What is deliberately NOT changed
+# --------------------------------
+# Nothing that determines whether the mission is *correct*: camera resolution
+# and scan altitude (so QR decodability is unchanged), min_observations and
+# min_confidence (so target confirmation is as strict as shipped), the planner's
+# rover radius, safety margin and clearance, the goal tolerance, and every QR
+# verification rule. test_ci_overlay_only_relaxes_scan_coverage enforces that.
+
+drone:
+  # Half speed: the same station passes through the footprint over roughly
+  # twice as many frames, which is what a 1 Hz camera needs.
+  scan_speed_mps: 0.7
+  # Stop scanning once the requested target is confirmed. The full sweep is the
+  # shipped default and is what the offline harness exercises; here it would
+  # cost tens of minutes of wall clock to map ground the mission never uses.
+  finish_scan_after_target_found: false

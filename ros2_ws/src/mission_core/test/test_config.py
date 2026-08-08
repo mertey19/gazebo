@@ -110,3 +110,67 @@ def test_nested_sections_can_be_overridden_individually(tmp_path: Path) -> None:
     # Untouched values inside the same section keep their defaults.
     assert config.drone.scan_speed_mps == DroneConfig().scan_speed_mps
     assert config.mission.target_qr == MissionConfigSection().target_qr
+
+
+# ---------------------------------------------------------------------------
+# The CI overlay
+# ---------------------------------------------------------------------------
+
+CI_CONFIG = REPO_ROOT / "ros2_ws" / "src" / "mission_bringup" / "config" / "mission_ci.yaml"
+
+#: The only values the CI overlay is allowed to change. Everything else must
+#: match the shipped configuration exactly, or a green CI run stops meaning
+#: that the shipped mission works.
+CI_ALLOWED_OVERRIDES = {
+    "drone.scan_speed_mps",
+    "drone.finish_scan_after_target_found",
+}
+
+
+def _flatten(data: dict, prefix: str = "") -> dict:
+    flat = {}
+    for key, value in data.items():
+        name = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(_flatten(value, name))
+        else:
+            flat[name] = value
+    return flat
+
+
+def test_ci_overlay_loads_and_validates() -> None:
+    assert CI_CONFIG.is_file(), f"missing {CI_CONFIG}"
+    assert load_mission_config(CI_CONFIG).validate() == []
+
+
+def test_ci_overlay_only_relaxes_scan_coverage() -> None:
+    """CI must not be made to pass by weakening what the mission checks.
+
+    The overlay exists because a GPU-less runner renders at ~1 Hz, so the drone
+    has to fly slower to see each station enough times. It must not touch
+    perception thresholds, planner clearances or the verification rules - those
+    are what a green E2E run is asserting.
+    """
+    shipped = _flatten(config_to_dict(load_mission_config(SHIPPED_CONFIG)))
+    ci = _flatten(config_to_dict(load_mission_config(CI_CONFIG)))
+
+    differing = {k for k in shipped if shipped[k] != ci[k]}
+    unexpected = differing - CI_ALLOWED_OVERRIDES
+    assert not unexpected, (
+        f"the CI overlay changes {sorted(unexpected)}, which is not in the allowlist. "
+        "If that is intentional, justify it in CI_ALLOWED_OVERRIDES."
+    )
+    # And it must actually be doing something, or it is dead weight.
+    assert differing, "the CI overlay no longer overrides anything"
+
+
+def test_ci_overlay_keeps_perception_and_safety_identical() -> None:
+    shipped = load_mission_config(SHIPPED_CONFIG)
+    ci = load_mission_config(CI_CONFIG)
+
+    assert config_to_dict(ci.perception) == config_to_dict(shipped.perception)
+    assert config_to_dict(ci.planner) == config_to_dict(shipped.planner)
+    assert config_to_dict(ci.verification) == config_to_dict(shipped.verification)
+    assert config_to_dict(ci.world_model) == config_to_dict(shipped.world_model)
+    assert config_to_dict(ci.drone.camera) == config_to_dict(shipped.drone.camera)
+    assert ci.drone.scan_altitude_m == shipped.drone.scan_altitude_m
