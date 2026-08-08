@@ -17,6 +17,7 @@ import argparse
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import rclpy
@@ -118,6 +119,7 @@ class PipelineChecker(Node):
         super().__init__("check_pipeline")
         self.stages = stages
         self._started = time.monotonic()
+        self._last_images: Dict[str, Any] = {}
         for stage in stages:
             self.create_subscription(
                 stage.msg_type, stage.topic, self._make_callback(stage), stage.qos
@@ -126,6 +128,8 @@ class PipelineChecker(Node):
     def _make_callback(self, stage: Stage):
         def callback(msg) -> None:
             stage.count += 1
+            if stage.msg_type is Image:
+                self._last_images[stage.name.replace(" ", "_")] = msg
             if stage.first_seen is None:
                 stage.first_seen = time.monotonic() - self._started
             if stage.validator is not None:
@@ -142,10 +146,42 @@ class PipelineChecker(Node):
     def all_required_seen(self) -> bool:
         return all(s.count > 0 for s in self.stages if s.required)
 
+    def save_images(self, directory: Path) -> None:
+        """Write the latest frame from each camera.
+
+        "The rover decoded nothing" and "the rover camera is showing a blank
+        buffer" look identical in the logs and need completely different
+        fixes, so keep the pixels.
+        """
+        import cv2
+        from cv_bridge import CvBridge
+
+        directory.mkdir(parents=True, exist_ok=True)
+        bridge = CvBridge()
+        for name, msg in self._last_images.items():
+            try:
+                frame = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not throw
+                print(f"could not convert the {name} frame: {exc}")
+                continue
+            path = directory / f"{name}.png"
+            cv2.imwrite(str(path), frame)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            print(
+                f"wrote {path} ({frame.shape[1]}x{frame.shape[0]}, "
+                f"min={gray.min()} max={gray.max()} mean={gray.mean():.1f})"
+            )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--save-images",
+        type=Path,
+        default=None,
+        help="write the most recent frame from each camera here, for inspection",
+    )
     args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args)
@@ -159,6 +195,8 @@ def main() -> int:
         settle = time.monotonic() + 5.0
         while rclpy.ok() and time.monotonic() < settle:
             rclpy.spin_once(checker, timeout_sec=0.2)
+        if args.save_images is not None:
+            checker.save_images(args.save_images)
     finally:
         stages = checker.stages
         checker.destroy_node()

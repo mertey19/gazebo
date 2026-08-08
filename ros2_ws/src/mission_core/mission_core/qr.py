@@ -112,7 +112,14 @@ def validate_frame(image: np.ndarray) -> np.ndarray:
     # failure, lens cap).  Detecting it here avoids burning CPU every tick and
     # gives the operator a real message instead of "no detections".
     if int(gray.max()) - int(gray.min()) < 2:
-        raise PerceptionError("camera frame is uniform - sensor is probably not streaming")
+        # Report the level: 0 means a black buffer (nothing rendered), a mid
+        # grey means the camera is staring at untextured ground or sky. Those
+        # are different faults and the message should not conflate them.
+        raise PerceptionError(
+            f"camera frame is uniform (min={int(gray.min())} max={int(gray.max())} "
+            f"mean={float(gray.mean()):.1f}) - the sensor is not streaming, or the "
+            f"camera sees only flat ground/sky"
+        )
     return np.ascontiguousarray(gray)
 
 
