@@ -318,7 +318,69 @@ def lookup_transform(
     return transform_from_msg(stamped), ""
 
 
+def odometry_pose_in_frame(
+    buffer_, msg, target_frame: str
+) -> Tuple[Optional[np.ndarray], str]:
+    """``nav_msgs/Odometry`` -> ``(x, y, yaw)`` in ``target_frame``.
+
+    Odometry is expressed in the vehicle's ``odom`` frame, which is **not** the
+    planning frame: gz's DiffDrive dead-reckons from zero at spawn, so a rover
+    spawned at (-8, -8) reports (0, 0) while standing still. Consuming that
+    pose directly as a map coordinate offsets the entire mission by the spawn
+    pose - the rover then drives a correctly planned path to entirely the wrong
+    place, and nothing in the logs looks wrong.
+
+    The lookup uses the latest available transform rather than the message
+    stamp: ``map -> odom`` is static in this stack, so the result is exact and
+    it cannot fail with an extrapolation error inside a control loop.
+    """
+    import rclpy.time
+
+    source_frame = msg.header.frame_id
+    if not source_frame:
+        return None, "odometry message has an empty frame_id"
+    pose = pose_to_xy_yaw(msg.pose.pose)
+    if source_frame == target_frame:
+        return pose, ""
+    try:
+        stamped = buffer_.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+    except Exception as exc:  # tf2 raises several unrelated exception types
+        return None, f"{target_frame} <- {source_frame}: {exc}"
+
+    transform = transform_from_msg(stamped)
+    position = transform.apply(np.array([pose[0], pose[1], 0.0]))
+    return np.array([position[0], position[1], pose[2] + transform.yaw]), ""
+
+
+def odometry_position_in_frame(
+    buffer_, msg, target_frame: str
+) -> Tuple[Optional[np.ndarray], float, str]:
+    """Same as :func:`odometry_pose_in_frame` but keeps the z coordinate.
+
+    Used by the drone, whose altitude is the whole point of the pose.
+    """
+    import rclpy.time
+
+    source_frame = msg.header.frame_id
+    if not source_frame:
+        return None, 0.0, "odometry message has an empty frame_id"
+    p = msg.pose.pose.position
+    position = np.array([p.x, p.y, p.z], dtype=float)
+    yaw = float(pose_to_xy_yaw(msg.pose.pose)[2])
+    if source_frame == target_frame:
+        return position, yaw, ""
+    try:
+        stamped = buffer_.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+    except Exception as exc:
+        return None, 0.0, f"{target_frame} <- {source_frame}: {exc}"
+
+    transform = transform_from_msg(stamped)
+    return transform.apply(position), yaw + transform.yaw, ""
+
+
 __all__: List[str] = [
+    "odometry_pose_in_frame",
+    "odometry_position_in_frame",
     "DEFAULT_QOS",
     "LATCHED_QOS",
     "SENSOR_QOS",

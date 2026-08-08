@@ -33,9 +33,9 @@ from .common import (
     SENSOR_QOS,
     declare_mission_config,
     make_header,
-    path_msg_to_array,
-    pose_to_xy_yaw,
     node_time_seconds,
+    odometry_pose_in_frame,
+    path_msg_to_array,
 )
 
 
@@ -70,7 +70,15 @@ class RoverPathFollowerNode(Node):
             approach_slowdown_m=rover.approach_slowdown_m,
         )
 
+        # tf2 is imported lazily so the module stays importable for linting
+        # on a machine without a full ROS installation.
+        from tf2_ros import Buffer, TransformListener
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         self._pose: Optional[np.ndarray] = None
+        self._pose_failures = 0
         self._last_step_s: Optional[float] = None
         self._terminal_logged = False
         self._safety_blocked = False
@@ -129,7 +137,19 @@ class RoverPathFollowerNode(Node):
         )
 
     def _on_odometry(self, msg: Odometry) -> None:
-        self._pose = pose_to_xy_yaw(msg.pose.pose)
+        # The path is expressed in the planning frame, so the pose used to
+        # follow it must be too. Odometry is in the rover's odom frame, which
+        # starts at the spawn pose; using it raw drove the rover a full spawn
+        # offset away from the goal while every log line looked healthy.
+        pose, error = odometry_pose_in_frame(self.tf_buffer, msg, self._path_frame)
+        if pose is None:
+            self._pose_failures += 1
+            self.get_logger().warn(
+                f"[ROVER] cannot express odometry in {self._path_frame}: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+        self._pose = pose
 
     def _on_scan(self, msg: LaserScan) -> None:
         """Emergency stop when something is inside the safety radius ahead."""

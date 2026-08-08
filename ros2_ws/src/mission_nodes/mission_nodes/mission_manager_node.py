@@ -54,8 +54,8 @@ from .common import (
     make_header,
     node_time_seconds,
     occupancy_from_msg,
+    odometry_pose_in_frame,
     planned_path_to_msg,
-    pose_to_xy_yaw,
     target_record_from_msg,
 )
 
@@ -86,6 +86,11 @@ class MissionManagerNode(Node):
         self._lock = threading.Lock()
 
         # -- latest inputs
+        from tf2_ros import Buffer, TransformListener
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         self._exploration: Optional[ExplorationStatus] = None
         self._rover_pose: Optional[np.ndarray] = None
         self._tracking: Optional[TrackingStatus] = None
@@ -178,7 +183,16 @@ class MissionManagerNode(Node):
         self._exploration = msg
 
     def _on_rover_odometry(self, msg: Odometry) -> None:
-        self._rover_pose = pose_to_xy_yaw(msg.pose.pose)
+        # Planning happens in the map frame, so the start pose must be in the
+        # map frame. Raw odometry is spawn-relative; see odometry_pose_in_frame.
+        pose, error = odometry_pose_in_frame(self.tf_buffer, msg, self.map_frame)
+        if pose is None:
+            self.get_logger().warn(
+                f"[MISSION] cannot express rover odometry in {self.map_frame}: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+        self._rover_pose = pose
 
     def _on_tracking(self, msg: TrackingStatus) -> None:
         self._tracking = msg

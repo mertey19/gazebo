@@ -25,7 +25,14 @@ from mission_core.exploration import (
 )
 from mission_interfaces.msg import ExplorationStatus
 
-from .common import DEFAULT_QOS, LATCHED_QOS, SENSOR_QOS, declare_mission_config, make_header
+from .common import (
+    DEFAULT_QOS,
+    LATCHED_QOS,
+    SENSOR_QOS,
+    declare_mission_config,
+    make_header,
+    odometry_position_in_frame,
+)
 
 
 class DroneExplorerNode(Node):
@@ -57,6 +64,11 @@ class DroneExplorerNode(Node):
             altitude_tolerance_m=self.config.drone.altitude_tolerance_m,
             waypoint_tolerance_m=self.config.drone.waypoint_tolerance_m,
         )
+
+        from tf2_ros import Buffer, TransformListener
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self._position: Optional[np.ndarray] = None
         self._yaw = 0.0
@@ -92,12 +104,21 @@ class DroneExplorerNode(Node):
 
     # -- callbacks ---------------------------------------------------------
     def _on_odometry(self, msg: Odometry) -> None:
-        position = msg.pose.pose.position
-        self._position = np.array([position.x, position.y, position.z], dtype=float)
-        q = msg.pose.pose.orientation
-        self._yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        # The lawnmower waypoints are map-frame coordinates, so the pose flown
+        # against them must be too. map -> drone/odom happens to be identity
+        # here, but relying on that is how the rover ended up a spawn offset
+        # from its goal.
+        position, yaw, error = odometry_position_in_frame(
+            self.tf_buffer, msg, self.config.frames.map_frame
         )
+        if position is None:
+            self.get_logger().warn(
+                f"[DRONE] cannot express odometry in {self.config.frames.map_frame}: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+        self._position = position
+        self._yaw = yaw
 
     def _on_start(self, _request, response):
         self.controller.start()

@@ -580,3 +580,57 @@ def test_nodes_only_use_fields_that_exist_in_the_interfaces() -> None:
         "TrackingStatus"
     ]
     assert {"targets_confirmed", "map_known_fraction", "qr_ids"} <= fields["WorldModelStatus"]
+
+
+# ---------------------------------------------------------------------------
+# Frame discipline in the nodes
+# ---------------------------------------------------------------------------
+
+NODES_DIR = REPO_ROOT / "ros2_ws" / "src" / "mission_nodes" / "mission_nodes"
+
+
+def test_odometry_is_never_consumed_as_a_map_pose() -> None:
+    """Every node that subscribes to Odometry must transform it into the map frame.
+
+    Regression, and the most expensive bug in this project so far: gz's
+    DiffDrive dead-reckons from zero at spawn, so a rover spawned at (-8, -8)
+    reports (0, 0) while parked. Two nodes used that pose directly as a map
+    coordinate, and the rover then drove a correctly planned, collision-free
+    path to a point one whole spawn offset away from the station - reporting
+    "Goal reached, cross-track 0.00 m" the entire time.
+
+    The offline harness cannot catch this, because there odometry *is* the map
+    pose. So it is pinned at the source level instead.
+    """
+    offenders = []
+    for source in sorted(NODES_DIR.glob("*_node.py")):
+        text = source.read_text(encoding="utf-8")
+        if "Odometry" not in text:
+            continue
+        subscribes = re.search(r"create_subscription\(\s*\n?\s*Odometry", text) is not None
+        if not subscribes:
+            continue
+        transforms = (
+            "odometry_pose_in_frame" in text or "odometry_position_in_frame" in text
+        )
+        if not transforms:
+            offenders.append(source.name)
+        # Reading the pose straight out of the message is the actual mistake.
+        if re.search(r"pose_to_xy_yaw\(\s*msg\.pose\.pose\s*\)", text):
+            offenders.append(f"{source.name} (uses msg.pose.pose directly)")
+
+    assert not offenders, (
+        "these nodes consume odometry without transforming it into the planning "
+        f"frame: {offenders}"
+    )
+
+
+def test_the_frame_checker_compares_tf_against_odometry() -> None:
+    """check_frames.py must be able to tell the two apart.
+
+    It is the only thing in the stack that would have caught the bug above at
+    runtime, and it did - so keep its two-way comparison.
+    """
+    text = (BRINGUP / "scripts" / "check_frames.py").read_text(encoding="utf-8")
+    assert "tf_matches_odom" in text
+    assert "does not agree with odometry" in text
