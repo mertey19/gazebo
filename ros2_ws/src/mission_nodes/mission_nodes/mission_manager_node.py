@@ -323,12 +323,15 @@ class MissionManagerNode(Node):
             outputs = orchestrator.update(inputs)
 
         for message in outputs.messages:
-            level = (
-                self.get_logger().error
-                if "FAILED" in message
-                else self.get_logger().info
-            )
-            level(message)
+            # Separate call sites on purpose: rclpy keys its logger cache by
+            # caller location and raises "Logger severity cannot be changed
+            # between calls" if one line logs at two severities. Picking a
+            # bound method dynamically crashed the node the first time a
+            # mission failed - i.e. exactly on the path that must stay alive.
+            if "FAILED" in message:
+                self.get_logger().error(message)
+            else:
+                self.get_logger().info(message)
         if outputs.transition is not None:
             self.get_logger().info(f"[MISSION] state {outputs.transition}")
             self._publish_status()

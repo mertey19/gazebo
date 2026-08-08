@@ -110,6 +110,9 @@ def declare_mission_config(node: Node, default_config_file: str = "") -> Mission
             "parameter 'config_file' is empty; point it at config/mission.yaml"
         )
     config = load_mission_config(config_file)
+    # Say which file won. "Is this node running the overlay or the defaults?"
+    # should be answerable from the log, not inferred from behaviour.
+    node.get_logger().info(f"[CONFIG] loaded {config_file}")
 
     flat = _flatten(config_to_dict(config))
     for name, value in flat.items():

@@ -81,8 +81,13 @@ class DroneExplorerNode(Node):
         self.get_logger().info(
             f"[DRONE] explorer ready: {len(self.waypoints)} waypoints, "
             f"{self.config.drone.lane_spacing_m:.1f} m lanes at "
-            f"{self.config.drone.scan_altitude_m:.1f} m "
-            f"(camera footprint {self.config.camera_ground_footprint_m():.2f} m)"
+            f"{self.config.drone.scan_altitude_m:.1f} m, "
+            f"scan speed {self.config.drone.scan_speed_mps:.2f} m/s, "
+            f"finish_scan_after_target_found="
+            f"{self.config.drone.finish_scan_after_target_found}, "
+            f"camera {self.config.drone.camera.width}x{self.config.drone.camera.height}"
+            f"@{self.config.drone.camera.update_rate_hz:.1f}Hz "
+            f"(footprint {self.config.camera_ground_footprint_m():.2f} m)"
         )
 
     # -- callbacks ---------------------------------------------------------

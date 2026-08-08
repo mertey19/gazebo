@@ -178,16 +178,17 @@ class QrDetectorNode(Node):
     # -- helpers -----------------------------------------------------------
     def _note_bad_frame(self, detail: str) -> None:
         self._consecutive_bad_frames += 1
-        level = (
-            self.get_logger().error
-            if self._consecutive_bad_frames >= self.config.perception.max_consecutive_bad_frames
-            else self.get_logger().warn
-        )
-        level(
+        text = (
             f"[QR] {self.camera_name} unusable frame ({self._consecutive_bad_frames} "
-            f"consecutive): {detail}",
-            throttle_duration_sec=2.0,
+            f"consecutive): {detail}"
         )
+        # Two call sites, not one bound method chosen at runtime: rclpy keys
+        # its logger cache by caller location and rejects a severity change
+        # from the same line.
+        if self._consecutive_bad_frames >= self.config.perception.max_consecutive_bad_frames:
+            self.get_logger().error(text, throttle_duration_sec=2.0)
+        else:
+            self.get_logger().warn(text, throttle_duration_sec=2.0)
 
     def _build_observation(self, detection, map_from_camera, image_msg) -> QrObservation:
         position_map = map_from_camera.apply(detection.position_optical)
