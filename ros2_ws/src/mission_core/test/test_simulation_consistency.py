@@ -686,3 +686,10 @@ def test_tf_lookups_do_not_block_and_do_not_drop_late_data() -> None:
     )
     assert "allow_latest_fallback" in signature.group(1)
     assert "rclpy.time.Time()" in common, "there must be a latest-available fallback"
+
+
+def test_safety_lidar_offset_matches_the_sdf(sdf_models, config) -> None:
+    """The configured lidar offset is used in a safety inequality, so it must
+    equal the real mounting pose rather than approximate it."""
+    pose, _ = parse_pose(find_sensor(sdf_models["mission_rover"], "safety_lidar").find("pose").text)
+    assert pose[0] == pytest.approx(config.rover.safety_lidar_forward_offset_m, abs=1e-6)

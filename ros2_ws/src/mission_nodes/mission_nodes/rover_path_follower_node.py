@@ -176,7 +176,7 @@ class RoverPathFollowerNode(Node):
         angles = msg.angle_min + np.arange(ranges.size) * msg.angle_increment
         # Only a narrow forward wedge matters: the rover cannot strafe, so a
         # return off to the side is not on a collision course.
-        forward = np.abs(angles) <= math.radians(35.0)
+        forward = np.abs(angles) <= self.config.rover.obstacle_stop_half_angle_rad
         valid = np.isfinite(ranges) & (ranges >= msg.range_min) & (ranges <= msg.range_max)
         candidates = ranges[forward & valid]
         self._min_forward_range = float(candidates.min()) if candidates.size else math.inf

@@ -182,3 +182,42 @@ def test_ci_overlay_keeps_perception_and_safety_identical() -> None:
     assert config_to_dict(ci.drone.camera) == config_to_dict(shipped.drone.camera)
     assert ci.drone.scan_altitude_m == shipped.drone.scan_altitude_m
     assert ci.drone.finish_scan_after_target_found is True
+
+
+def test_emergency_stop_cannot_fire_on_a_planned_path() -> None:
+    """The safety lidar must not see the clearance the planner guarantees.
+
+    Regression from the Gazebo matrix: TARGET_1 and TARGET_3 failed 0/3 with
+    PATH_TRACKING_FAILURE while TARGET_2 passed 3/3. The stop threshold was
+    0.45 m measured from a lidar mounted 0.24 m ahead of base_link, but the
+    planner only guaranteed 0.55 m from base_link - so on any route that
+    passed near an obstacle the lidar necessarily read ~0.31 m and stopped the
+    rover on its own correctly planned path. TARGET_2's route detoured widely
+    and never came close, which is exactly why it looked fine.
+    """
+    config = load_mission_config(SHIPPED_CONFIG)
+    visible = config.clearance_m - config.rover.safety_lidar_forward_offset_m
+    assert config.rover.obstacle_stop_distance_m < visible, (
+        f"stop distance {config.rover.obstacle_stop_distance_m:.2f} m >= clearance "
+        f"visible to the lidar {visible:.2f} m"
+    )
+    # Pure pursuit cuts corners; leave room for that too.
+    assert visible - config.rover.obstacle_stop_distance_m >= 0.10
+
+
+def test_stop_distance_still_allows_the_rover_to_stop() -> None:
+    """A threshold below the braking distance would be decorative."""
+    config = load_mission_config(SHIPPED_CONFIG)
+    braking_m = config.rover.max_linear_velocity**2 / (2.0 * 1.5)  # SDF max accel
+    assert config.rover.obstacle_stop_distance_m >= braking_m * 0.9, (
+        f"stop distance {config.rover.obstacle_stop_distance_m:.2f} m is below the "
+        f"{braking_m:.2f} m the rover needs to halt from full speed"
+    )
+
+
+def test_inconsistent_stop_distance_is_rejected() -> None:
+    from dataclasses import replace as dc_replace
+
+    config = load_mission_config(SHIPPED_CONFIG)
+    bad = dc_replace(config, rover=dc_replace(config.rover, obstacle_stop_distance_m=0.9))
+    assert any("obstacle_stop_distance_m" in p for p in bad.validate())

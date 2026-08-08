@@ -103,8 +103,16 @@ class RoverConfig:
     approach_slowdown_m: float = 1.0
     navigation_timeout_s: float = 240.0
     control_rate_hz: float = 20.0
-    #: Emergency stop distance from the rover's 2D safety lidar.
-    obstacle_stop_distance_m: float = 0.45
+    #: Emergency stop range from the rover's 2D safety lidar. Must stay below
+    #: the clearance the planner guarantees, measured from the lidar rather
+    #: than from base_link - otherwise the stop fires on the rover's own
+    #: correctly planned path instead of on a genuine surprise.
+    obstacle_stop_distance_m: float = 0.30
+    #: Forward mounting offset of that lidar; mirrors the SDF <pose>.
+    safety_lidar_forward_offset_m: float = 0.24
+    #: Half-width of the forward wedge the stop considers. Wide wedges see
+    #: walls the rover is merely driving past, not heading into.
+    obstacle_stop_half_angle_rad: float = 0.35
     #: How long an obstacle may continuously suppress forward motion before
     #: the follower asks the mission manager for a fresh plan.
     safety_stop_replan_delay_s: float = 3.0
@@ -145,7 +153,10 @@ class WorldModelConfig:
 @dataclass(frozen=True)
 class PlannerConfig:
     rover_radius_m: float = 0.30
-    obstacle_safety_margin_m: float = 0.25
+    #: Clearance added to the rover radius. Sized so pure pursuit can cut a
+    #: corner by ~0.12 m and the safety lidar still reads more than
+    #: rover.obstacle_stop_distance_m on a clean path.
+    obstacle_safety_margin_m: float = 0.40
     planning_resolution_m: float = 0.20
     #: Fail closed: the rover may only plan through cells the mapping pass has
     #: actually observed. Operators can explicitly relax this for exploration.
@@ -274,6 +285,16 @@ class MissionConfig:
             problems.append(
                 "verification.max_range_m must exceed planner.approach_distance_m or the "
                 "rover will reject the very code it parked in front of"
+            )
+        # The emergency stop must never be able to fire on a path the planner
+        # itself produced; it exists for obstacles the map did not contain.
+        lidar_clearance = self.clearance_m - self.rover.safety_lidar_forward_offset_m
+        if self.rover.obstacle_stop_distance_m >= lidar_clearance:
+            problems.append(
+                f"rover.obstacle_stop_distance_m ({self.rover.obstacle_stop_distance_m:.2f} m) "
+                f"is not below the clearance visible to the safety lidar "
+                f"({lidar_clearance:.2f} m = rover radius + safety margin - lidar offset); "
+                "the emergency stop would trigger on the rover's own planned path"
             )
         if self.rover.max_replans < 0:
             problems.append("rover.max_replans must not be negative")

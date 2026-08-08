@@ -83,7 +83,12 @@ rover:
   approach_slowdown_m: 1.0
   navigation_timeout_s: 240.0
   control_rate_hz: 20.0
-  obstacle_stop_distance_m: 0.45
+  # Must stay below the clearance the planner guarantees as seen from the
+  # lidar (rover_radius + safety_margin - lidar offset); otherwise the
+  # emergency stop fires on the rover's own correctly planned path.
+  obstacle_stop_distance_m: 0.30
+  safety_lidar_forward_offset_m: 0.24
+  obstacle_stop_half_angle_rad: 0.35
   # If a newly appeared obstacle holds the safety stop this long, refresh the
   # route from the rover's live pose instead of waiting for navigation timeout.
   safety_stop_replan_delay_s: 3.0
@@ -118,7 +123,9 @@ world_model:
 
 planner:
   rover_radius_m: 0.30
-  obstacle_safety_margin_m: 0.25
+  # Sized so pure pursuit can cut a corner by ~0.12 m and the safety lidar
+  # still reads more than rover.obstacle_stop_distance_m on a clean path.
+  obstacle_safety_margin_m: 0.40
   planning_resolution_m: 0.20
   # Fail closed: the rover stays inside the area the drone actually observed.
   # Set true only when an operator deliberately accepts unknown-space travel.
