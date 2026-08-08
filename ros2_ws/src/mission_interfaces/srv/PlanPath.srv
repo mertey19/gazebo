@@ -1,0 +1,16 @@
+# Plan a collision-free rover path to a *discovered* target.
+#
+# The service refuses unknown or unconfirmed payloads rather than inventing a
+# position: the coordinates must come from perception.
+
+string target_qr
+geometry_msgs/Point start          # rover start in the planning frame
+bool use_current_rover_pose        # if true, ignore `start` and use live odometry
+---
+bool success
+nav_msgs/Path path
+float64 length_m
+uint32 expanded_nodes
+float64 clearance_m                # obstacle inflation actually applied
+string failure_reason              # FailureReason enum value
+string message

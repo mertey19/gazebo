@@ -1,0 +1,206 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <!--
+    Differential-drive UGV.
+
+    base_link's origin sits on the ground plane between the drive wheels, so
+    every sensor pose in this file is also the sensor's height above ground -
+    which is what the static transforms in mission.launch.py and the mount
+    constants in the offline harness use.
+  -->
+  <model name="mission_rover">
+    <pose>0 0 0 0 0 0</pose>
+
+    <link name="base_link">
+      <inertial>
+        <pose>0 0 0.20 0 0 0</pose>
+        <mass>9.0</mass>
+        <inertia>
+          <ixx>0.150</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.320</iyy><iyz>0</iyz>
+          <izz>0.400</izz>
+        </inertia>
+      </inertial>
+
+      <visual name="chassis">
+        <pose>0 0 0.20 0 0 0</pose>
+        <geometry><box><size>0.60 0.40 0.16</size></box></geometry>
+        <material>
+          <ambient>0.20 0.18 0.10 1</ambient>
+          <diffuse>0.85 0.65 0.10 1</diffuse>
+        </material>
+      </visual>
+      <visual name="mast">
+        <pose>0.18 0 0.36 0 0 0</pose>
+        <geometry><box><size>0.08 0.08 0.24</size></box></geometry>
+        <material><diffuse>0.25 0.25 0.28 1</diffuse></material>
+      </visual>
+      <collision name="chassis_collision">
+        <pose>0 0 0.20 0 0 0</pose>
+        <geometry><box><size>0.60 0.40 0.16</size></box></geometry>
+      </collision>
+
+      <!-- Passive support at each end; spheres avoid the yaw resistance a
+           fixed caster box would add to the diff-drive model. -->
+      <collision name="caster_front">
+        <pose>0.24 0 0.06 0 0 0</pose>
+        <geometry><sphere><radius>0.06</radius></sphere></geometry>
+        <surface>
+          <friction><ode><mu>0.02</mu><mu2>0.02</mu2></ode></friction>
+        </surface>
+      </collision>
+      <visual name="caster_front_visual">
+        <pose>0.24 0 0.06 0 0 0</pose>
+        <geometry><sphere><radius>0.06</radius></sphere></geometry>
+        <material><diffuse>0.2 0.2 0.2 1</diffuse></material>
+      </visual>
+      <collision name="caster_rear">
+        <pose>-0.24 0 0.06 0 0 0</pose>
+        <geometry><sphere><radius>0.06</radius></sphere></geometry>
+        <surface>
+          <friction><ode><mu>0.02</mu><mu2>0.02</mu2></ode></friction>
+        </surface>
+      </collision>
+      <visual name="caster_rear_visual">
+        <pose>-0.24 0 0.06 0 0 0</pose>
+        <geometry><sphere><radius>0.06</radius></sphere></geometry>
+        <material><diffuse>0.2 0.2 0.2 1</diffuse></material>
+      </visual>
+
+      <!--
+        Forward verification camera at 0.55 m. At the 1.8 m nominal standoff
+        the 0.80 m plate spans roughly 0.66 of the image height, so it fits
+        with margin; moving it much lower or closer clips the code and the
+        rover can never confirm the station. Mirrored by ROVER_CAMERA_MOUNT.
+      -->
+      <sensor name="front_camera" type="camera">
+        <pose>0.22 0 0.55 0 0 0</pose>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>/rover/camera/image</topic>
+        <gz_frame_id>rover/camera_optical_frame</gz_frame_id>
+        <camera>
+          <!-- Must match rover.camera in config/mission.yaml. -->
+          <horizontal_fov>1.20</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip><near>0.05</near><far>30</far></clip>
+          <optical_frame_id>rover/camera_optical_frame</optical_frame_id>
+        </camera>
+      </sensor>
+
+      <!-- Planar safety lidar: emergency stop only. Global obstacle knowledge
+           comes from the drone, which is the point of the scout/rover split. -->
+      <sensor name="safety_lidar" type="gpu_lidar">
+        <pose>0.24 0 0.30 0 0 0</pose>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>/rover/scan</topic>
+        <gz_frame_id>rover/lidar_link</gz_frame_id>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>180</samples>
+              <resolution>1</resolution>
+              <min_angle>-1.5707963</min_angle>
+              <max_angle>1.5707963</max_angle>
+            </horizontal>
+          </scan>
+          <range>
+            <min>0.08</min>
+            <max>12.0</max>
+            <resolution>0.01</resolution>
+          </range>
+        </lidar>
+      </sensor>
+    </link>
+
+    <link name="left_wheel">
+      <pose>0 0.23 0.12 -1.5707963 0 0</pose>
+      <inertial>
+        <mass>0.7</mass>
+        <inertia>
+          <ixx>0.0031</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.0031</iyy><iyz>0</iyz>
+          <izz>0.0050</izz>
+        </inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.12</radius><length>0.06</length></cylinder></geometry>
+        <material><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.12</radius><length>0.06</length></cylinder></geometry>
+        <surface>
+          <friction><ode><mu>1.2</mu><mu2>1.2</mu2></ode></friction>
+        </surface>
+      </collision>
+    </link>
+
+    <link name="right_wheel">
+      <pose>0 -0.23 0.12 -1.5707963 0 0</pose>
+      <inertial>
+        <mass>0.7</mass>
+        <inertia>
+          <ixx>0.0031</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.0031</iyy><iyz>0</iyz>
+          <izz>0.0050</izz>
+        </inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.12</radius><length>0.06</length></cylinder></geometry>
+        <material><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.12</radius><length>0.06</length></cylinder></geometry>
+        <surface>
+          <friction><ode><mu>1.2</mu><mu2>1.2</mu2></ode></friction>
+        </surface>
+      </collision>
+    </link>
+
+    <joint name="left_wheel_joint" type="revolute">
+      <parent>base_link</parent>
+      <child>left_wheel</child>
+      <axis>
+        <xyz expressed_in="__model__">0 1 0</xyz>
+        <limit><lower>-1e16</lower><upper>1e16</upper></limit>
+      </axis>
+    </joint>
+    <joint name="right_wheel_joint" type="revolute">
+      <parent>base_link</parent>
+      <child>right_wheel</child>
+      <axis>
+        <xyz expressed_in="__model__">0 1 0</xyz>
+        <limit><lower>-1e16</lower><upper>1e16</upper></limit>
+      </axis>
+    </joint>
+
+    <plugin filename="gz-sim-diff-drive-system"
+            name="gz::sim::systems::DiffDrive">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.46</wheel_separation>
+      <wheel_radius>0.12</wheel_radius>
+      <!-- Headroom above rover.max_linear_velocity/max_angular_velocity so the
+           follower's limits bind, not the plugin's. -->
+      <max_linear_acceleration>1.5</max_linear_acceleration>
+      <max_angular_acceleration>4.0</max_angular_acceleration>
+      <topic>/model/mission_rover/cmd_vel</topic>
+      <odom_topic>/model/mission_rover/odometry</odom_topic>
+      <tf_topic>/model/mission_rover/tf</tf_topic>
+      <frame_id>rover/odom</frame_id>
+      <child_frame_id>rover/base_link</child_frame_id>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+
+    <!-- No JointStatePublisher: there is no robot_description or
+         robot_state_publisher in this stack, so wheel joint states would be an
+         unconsumed topic. RViz visualises the rover from its odometry. -->
+  </model>
+</sdf>

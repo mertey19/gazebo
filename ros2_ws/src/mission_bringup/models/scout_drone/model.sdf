@@ -1,0 +1,150 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <!--
+    Scout UAV.
+
+    Deliberately a *kinematic* multicopter: the gz-sim VelocityControl system
+    tracks a commanded body-frame twist directly instead of simulating rotor
+    aerodynamics. That removes PX4/ArduPilot SITL and an attitude-controller
+    tuning loop from the MVP's dependency chain, which is the single biggest
+    source of "it does not fly" failures. The perception, mapping, planning
+    and verification pipeline - everything the mission is actually about - is
+    unaffected by the choice. Swapping in MulticopterVelocityControl or a PX4
+    SITL bridge later only touches this file and drone_explorer_node's output
+    topic; see README "Known limitations".
+  -->
+  <model name="scout_drone">
+    <pose>0 0 0.06 0 0 0</pose>
+
+    <link name="base_link">
+      <!-- Gravity off: VelocityControl overrides the link velocity every step,
+           so leaving gravity on only produces a constant fight between the
+           solver and the controller. Explicit here rather than implicit. -->
+      <gravity>false</gravity>
+
+      <inertial>
+        <mass>1.5</mass>
+        <inertia>
+          <ixx>0.0217</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.0217</iyy><iyz>0</iyz>
+          <izz>0.0400</izz>
+        </inertia>
+      </inertial>
+
+      <visual name="body">
+        <geometry><box><size>0.30 0.30 0.09</size></box></geometry>
+        <material>
+          <ambient>0.10 0.12 0.16 1</ambient>
+          <diffuse>0.15 0.18 0.24 1</diffuse>
+        </material>
+      </visual>
+      <visual name="arm_a">
+        <pose>0 0 0.01 0 0 0.7853982</pose>
+        <geometry><box><size>0.60 0.04 0.02</size></box></geometry>
+        <material><diffuse>0.35 0.35 0.38 1</diffuse></material>
+      </visual>
+      <visual name="arm_b">
+        <pose>0 0 0.01 0 0 -0.7853982</pose>
+        <geometry><box><size>0.60 0.04 0.02</size></box></geometry>
+        <material><diffuse>0.35 0.35 0.38 1</diffuse></material>
+      </visual>
+      <!-- Bright nose marker: makes heading obvious in the Gazebo GUI. -->
+      <visual name="nose">
+        <pose>0.16 0 0.02 0 0 0</pose>
+        <geometry><box><size>0.06 0.06 0.03</size></box></geometry>
+        <material><diffuse>0.90 0.25 0.10 1</diffuse></material>
+      </visual>
+
+      <collision name="body_collision">
+        <geometry><box><size>0.30 0.30 0.09</size></box></geometry>
+      </collision>
+
+      <!--
+        Nadir camera. gz cameras look along their local +X, so a +90 deg pitch
+        points the optical axis straight down. The mount offset (0.10, 0,
+        -0.08) is mirrored by DRONE_CAMERA_MOUNT in the offline harness and by
+        the static transform published in mission.launch.py; all three must
+        agree or every target lands offset along its viewing ray.
+      -->
+      <sensor name="down_camera" type="camera">
+        <pose>0.10 0 -0.08 0 1.5707963 0</pose>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>/drone/camera/image</topic>
+        <!-- Pin the published frame_id instead of letting gz derive a scoped
+             sensor name: qr_detector_node looks this frame up in TF. -->
+        <gz_frame_id>drone/camera_optical_frame</gz_frame_id>
+        <camera>
+          <!-- Must match drone.camera in config/mission.yaml. -->
+          <horizontal_fov>1.047</horizontal_fov>
+          <image>
+            <width>1280</width>
+            <height>960</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip><near>0.1</near><far>60</far></clip>
+          <optical_frame_id>drone/camera_optical_frame</optical_frame_id>
+        </camera>
+      </sensor>
+
+      <!--
+        Downward 3D lidar; the only source of obstacle geometry in the mission.
+        Deliberately mounted level and aimed downwards through its *vertical
+        scan range* (-90 deg to -45 deg) rather than by rotating the sensor:
+        an unrotated sensor frame makes drone/base_link -> drone/lidar_link a
+        pure translation, which removes an easy place to get a rotation wrong
+        and smear the whole occupancy grid.
+
+        At the 6 m scan altitude that cone reaches a 6 m ground radius, so
+        consecutive 5 m lawnmower lanes overlap and the arena is fully mapped.
+      -->
+      <sensor name="down_lidar" type="gpu_lidar">
+        <pose>0 0 -0.06 0 0 0</pose>
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>/drone/scan/points</topic>
+        <gz_frame_id>drone/lidar_link</gz_frame_id>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>180</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159</min_angle>
+              <max_angle>3.14159</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>24</samples>
+              <resolution>1</resolution>
+              <min_angle>-1.5707963</min_angle>
+              <max_angle>-0.7853982</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.30</min>
+            <max>30.0</max>
+            <resolution>0.01</resolution>
+          </range>
+        </lidar>
+      </sensor>
+    </link>
+
+    <!-- Body-frame twist input. drone_explorer_node rotates its map-frame
+         velocity into the body frame before publishing here. -->
+    <plugin filename="gz-sim-velocity-control-system"
+            name="gz::sim::systems::VelocityControl">
+      <topic>/model/scout_drone/cmd_vel</topic>
+    </plugin>
+
+    <plugin filename="gz-sim-odometry-publisher-system"
+            name="gz::sim::systems::OdometryPublisher">
+      <odom_frame>drone/odom</odom_frame>
+      <robot_base_frame>drone/base_link</robot_base_frame>
+      <odom_topic>/model/scout_drone/odometry</odom_topic>
+      <tf_topic>/model/scout_drone/tf</tf_topic>
+      <dimensions>3</dimensions>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+  </model>
+</sdf>

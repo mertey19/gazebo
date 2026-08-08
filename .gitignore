@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+out/
+
+# Machine-local Claude Code permission allowlist, not project content.
+.claude/settings.local.json

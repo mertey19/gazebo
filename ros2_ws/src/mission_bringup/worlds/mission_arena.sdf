@@ -1,0 +1,148 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <!--
+    Mission arena: 22 x 22 m of open ground carrying three uniquely QR-coded
+    stations and two static obstacles.
+
+    Layout rationale (map frame, ENU, metres):
+
+      rover start (-8, -8)        drone start (-8, -6.5)
+      TARGET_1    ( 6,  6)        TARGET_2    ( 7, -5)      TARGET_3 (-6, 6)
+      obstacle_a  ( 0, -6) 6.0 x 1.0   blocks the straight run to TARGET_2
+      obstacle_b  ( 0,  0) 1.0 x 6.0   blocks the straight run to TARGET_1
+
+    The obstacles are positioned so the *default* mission (TARGET_2) and the
+    TARGET_1 mission both require a genuine detour: a planner that ignored
+    obstacles would produce a visibly different, shorter, colliding path.
+    TARGET_3 is reachable directly and acts as the control case.
+
+    Both obstacles are static for this MVP. Nothing here prevents a dynamic
+    one later: the occupancy mapper accumulates evidence per cell and the
+    planner re-reads the grid on every plan, so a moving box would simply
+    appear in the next grid.
+  -->
+  <world name="mission_arena">
+
+    <physics name="default_physics" type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <!-- Required for the camera and gpu_lidar sensors to produce data. -->
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+
+    <gravity>0 0 -9.81</gravity>
+
+    <scene>
+      <ambient>0.7 0.7 0.7 1</ambient>
+      <background>0.55 0.65 0.80 1</background>
+      <grid>false</grid>
+      <shadows>true</shadows>
+    </scene>
+
+    <!-- Near-overhead sun. A low sun casts long station shadows across the
+         ground that can merge with a QR quiet zone and cost detections. -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.25 0.25 0.25 1</specular>
+      <attenuation>
+        <range>200</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.2 0.25 -0.95</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>60 60</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>60 60</size></plane></geometry>
+          <material>
+            <ambient>0.42 0.45 0.42 1</ambient>
+            <diffuse>0.50 0.54 0.50 1</diffuse>
+            <specular>0.02 0.02 0.02 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================= targets ================= -->
+    <include>
+      <uri>model://target_station_target_1</uri>
+      <name>target_station_1</name>
+      <pose>6 6 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://target_station_target_2</uri>
+      <name>target_station_2</name>
+      <pose>7 -5 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://target_station_target_3</uri>
+      <name>target_station_3</name>
+      <pose>-6 6 0 0 0 0</pose>
+    </include>
+
+    <!-- ================= obstacles ================= -->
+    <model name="obstacle_a">
+      <static>true</static>
+      <pose>0 -6 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>6.0 1.0 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>6.0 1.0 1.5</size></box></geometry>
+          <material>
+            <ambient>0.25 0.26 0.30 1</ambient>
+            <diffuse>0.38 0.40 0.45 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obstacle_b">
+      <static>true</static>
+      <pose>0 0 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>1.0 6.0 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.0 6.0 1.5</size></box></geometry>
+          <material>
+            <ambient>0.25 0.26 0.30 1</ambient>
+            <diffuse>0.38 0.40 0.45 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================= vehicles ================= -->
+    <include>
+      <uri>model://scout_drone</uri>
+      <name>scout_drone</name>
+      <pose>-8 -6.5 0.06 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://mission_rover</uri>
+      <name>mission_rover</name>
+      <pose>-8 -8 0 0 0 0</pose>
+    </include>
+
+  </world>
+</sdf>

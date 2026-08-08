@@ -1,0 +1,112 @@
+"""Configuration loading and the startup sanity checks it performs."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+import yaml
+
+from mission_core.config import (
+    ConfigError,
+    DroneConfig,
+    MissionConfig,
+    MissionConfigSection,
+    PlannerConfig,
+    config_to_dict,
+    load_mission_config,
+    mission_config_from_dict,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+SHIPPED_CONFIG = REPO_ROOT / "ros2_ws" / "src" / "mission_bringup" / "config" / "mission.yaml"
+
+
+def test_shipped_configuration_loads_and_validates() -> None:
+    assert SHIPPED_CONFIG.is_file(), f"missing {SHIPPED_CONFIG}"
+    config = load_mission_config(SHIPPED_CONFIG)
+    assert config.validate() == []
+    assert config.mission.target_qr in config.mission.known_payloads
+
+
+def test_shipped_configuration_matches_the_code_defaults() -> None:
+    """A drift between YAML and dataclass defaults is a silent trap."""
+    assert config_to_dict(load_mission_config(SHIPPED_CONFIG)) == config_to_dict(MissionConfig())
+
+
+def test_round_trip_through_dict_is_lossless() -> None:
+    config = MissionConfig()
+    assert config_to_dict(mission_config_from_dict(config_to_dict(config))) == config_to_dict(
+        config
+    )
+
+
+def test_unknown_key_is_rejected(tmp_path: Path) -> None:
+    """A typo must fail at startup rather than silently use a default."""
+    path = tmp_path / "typo.yaml"
+    path.write_text(
+        yaml.safe_dump({"mission": {"target_qr": "TARGET_1", "targt_qr": "TARGET_2"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="unknown key"):
+        load_mission_config(path)
+
+
+def test_missing_file_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="not found"):
+        load_mission_config(tmp_path / "nope.yaml")
+
+
+def test_scan_altitude_that_cannot_be_decoded_is_rejected() -> None:
+    """The single most useful startup check: can the drone read the codes?"""
+    config = MissionConfig()
+    too_high = replace(config, drone=replace(config.drone, scan_altitude_m=30.0))
+    problems = too_high.validate()
+    assert any("px per QR module" in p for p in problems)
+    with pytest.raises(ConfigError):
+        too_high.require_valid()
+
+
+def test_lane_spacing_wider_than_the_camera_footprint_is_rejected() -> None:
+    config = MissionConfig()
+    gappy = replace(config, drone=replace(config.drone, lane_spacing_m=20.0))
+    assert any("footprint" in p for p in gappy.validate())
+
+
+def test_goal_tolerance_must_stay_inside_the_approach_distance() -> None:
+    config = MissionConfig()
+    bad = replace(config, planner=replace(config.planner, approach_distance_m=0.2))
+    assert any("approach_distance_m" in p for p in bad.validate())
+
+
+def test_unknown_requested_payload_is_rejected() -> None:
+    config = MissionConfig()
+    bad = replace(config, mission=replace(config.mission, target_qr="TARGET_42"))
+    assert any("known_payloads" in p for p in bad.validate())
+
+
+def test_derived_quantities_are_consistent() -> None:
+    config = MissionConfig()
+    assert config.clearance_m == pytest.approx(
+        config.planner.rover_radius_m + config.planner.obstacle_safety_margin_m
+    )
+    assert config.camera_ground_footprint_m() > config.drone.lane_spacing_m
+    assert 0.0 < config.code_size_m("TARGET_1") < config.mission.qr_plate_size_m
+
+
+def test_planner_resolution_coarser_than_the_rover_is_rejected() -> None:
+    config = MissionConfig()
+    bad = replace(config, planner=PlannerConfig(planning_resolution_m=1.0))
+    assert any("planning_resolution_m" in p for p in bad.validate())
+
+
+def test_nested_sections_can_be_overridden_individually(tmp_path: Path) -> None:
+    """Partial YAML must merge onto defaults, not blank out whole sections."""
+    path = tmp_path / "partial.yaml"
+    path.write_text(yaml.safe_dump({"drone": {"scan_altitude_m": 5.0}}), encoding="utf-8")
+    config = load_mission_config(path)
+    assert config.drone.scan_altitude_m == 5.0
+    # Untouched values inside the same section keep their defaults.
+    assert config.drone.scan_speed_mps == DroneConfig().scan_speed_mps
+    assert config.mission.target_qr == MissionConfigSection().target_qr

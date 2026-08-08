@@ -1,0 +1,25 @@
+# Run one complete autonomous mission.
+#
+# An action rather than a service because the mission is long-running,
+# cancellable, and worth reporting progress on.
+
+string target_qr                  # payload the rover must physically reach
+---
+bool success
+string final_state
+string failure_reason
+string verified_qr
+float64 path_length_m
+uint32 path_poses
+float64 duration_s
+# Flattened validation report: one entry per mandatory + advisory check.
+string[] check_names
+bool[] check_passed
+string[] check_details
+---
+string state
+string detail
+float64 elapsed_s
+uint32 targets_confirmed
+uint32 obstacles_mapped
+float64 coverage_fraction

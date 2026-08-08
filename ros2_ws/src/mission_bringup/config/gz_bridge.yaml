@@ -1,0 +1,78 @@
+# ros_gz_bridge topic map.
+#
+# Direction reminder: GZ_TO_ROS moves data out of the simulator, ROS_TO_GZ
+# moves commands in. Everything the mission consumes is GZ_TO_ROS; only the two
+# cmd_vel topics go the other way.
+#
+# Camera images are bridged by ros_gz_image (see mission.launch.py), which is
+# considerably cheaper than routing them through the generic bridge.
+
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# ---------------- drone ----------------
+- ros_topic_name: "/drone/cmd_vel"
+  gz_topic_name: "/model/scout_drone/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/drone/odometry"
+  gz_topic_name: "/model/scout_drone/odometry"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+
+# drone/odom -> drone/base_link, published by the OdometryPublisher system.
+- ros_topic_name: "/tf"
+  gz_topic_name: "/model/scout_drone/tf"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/drone/scan/points"
+  gz_topic_name: "/drone/scan/points/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/drone/camera/camera_info"
+  gz_topic_name: "/drone/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
+# ---------------- rover ----------------
+- ros_topic_name: "/rover/cmd_vel"
+  gz_topic_name: "/model/mission_rover/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/rover/odometry"
+  gz_topic_name: "/model/mission_rover/odometry"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+
+# rover/odom -> rover/base_link, dead-reckoned by the DiffDrive system.
+- ros_topic_name: "/tf"
+  gz_topic_name: "/model/mission_rover/tf"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/rover/scan"
+  gz_topic_name: "/rover/scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/rover/camera/camera_info"
+  gz_topic_name: "/rover/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS

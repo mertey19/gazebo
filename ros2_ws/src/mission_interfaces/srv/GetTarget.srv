@@ -1,0 +1,7 @@
+# Query the world model for one payload. A quick lookup, hence a service.
+string qr_id
+---
+bool found                              # true only when a record exists at all
+bool usable                             # true only when that record is CONFIRMED
+mission_interfaces/TargetRecord target
+string message                          # human-readable reason when not usable

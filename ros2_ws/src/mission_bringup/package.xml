@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://purl.oclc.org/dsdl/schematron"?>
+<package format="3">
+  <name>mission_bringup</name>
+  <version>1.0.0</version>
+  <description>
+    Gazebo world, robot models, QR target models, configuration, RViz setup and
+    the single top-level launch file for the autonomous UAV/UGV QR mission.
+  </description>
+  <maintainer email="merterdoganyildirim@gmail.com">Mert Erdogan Yildirim</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <exec_depend>mission_core</exec_depend>
+  <exec_depend>mission_interfaces</exec_depend>
+  <exec_depend>mission_nodes</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_image</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
