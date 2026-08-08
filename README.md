@@ -22,10 +22,10 @@ has merely been written.
 
 | Layer | Status |
 |---|---|
-| `mission_core` algorithms (QR/PnP, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed.** 152 tests, including a full offline mission per target. |
+| `mission_core` algorithms (QR/PnP, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed.** 154 tests, including a full offline mission per target. |
 | Offline mission harness (renders real QR textures through a real pinhole camera, ray-casts a lidar, integrates unicycle kinematics) | **Executed.** Drives the production pipeline with zero simulator. Reproduce with `python scripts/run_offline_mission.py`. |
 | ROS 2 Jazzy layer (interfaces, nodes, launch) | **Executed.** `colcon build` + `colcon test`, interfaces introspectable, every node entry point installed, launch file expands. |
-| **Gazebo Harmonic, full mission** | **Executed.** `gazebo-e2e` launches the whole stack headless and blocks on the real mission verdict. |
+| **Gazebo Harmonic, full mission** | **Executed.** `gazebo-e2e` launches the whole stack headless and blocks on the real mission verdict. A green workflow requires all three targets to succeed in three independent trials each. |
 
 The last row is the one that matters, and it reports `MISSION_SUCCESS`:
 
@@ -40,6 +40,11 @@ The last row is the one that matters, and it reports `MISSION_SUCCESS`:
 
 path : 5 poses, 14.98 m       QR position error vs ground truth: ~2 cm
 ```
+
+That recorded run is one concrete trace. The current CI gate is broader: its
+matrix expands to `TARGET_1`, `TARGET_2` and `TARGET_3`, with three independent
+Gazebo jobs per target. `fail-fast` is disabled, so a failure keeps the other
+eight trials running and preserves a complete diagnostic set.
 
 A green `unit-tests` says nothing about Gazebo, which is why the jobs are kept
 separate. The development host itself is Windows 11 with no WSL2 and no Docker,
@@ -154,7 +159,7 @@ ros2_ws/src/
 │   │   ├── qr.py              decode + PnP marker pose
 │   │   ├── validation.py      the success criteria
 │   │   └── world_model.py     the digital twin
-│   └── test/                  152 tests, incl. sim_harness/offline_mission
+│   └── test/                  154 tests, incl. sim_harness/offline_mission
 ├── mission_interfaces/    9 msgs, 2 srvs, 1 action
 ├── mission_nodes/         5 rclpy nodes (thin adapters over mission_core)
 └── mission_bringup/       world, models, config, launch, rviz, frame checker
@@ -370,7 +375,7 @@ for PnP cannot drift apart.
 No ROS installation required — `mission_core` is deliberately ROS-free:
 
 ```bash
-python -m pytest                          # everything (152 tests, ~2 min)
+python -m pytest                          # everything (154 tests, ~2 min)
 python -m pytest -m "not integration"     # fast unit tests only (~3 s)
 python -m pytest -m integration -v        # full end-to-end mission runs
 ```
@@ -539,11 +544,14 @@ remaining caveats:
    (Capping the simulator's real-time factor does *not* help: rendering is
    wall-clock bound, so Gazebo drops more frames per simulated second —
    measured 0.7 at RTF 0.15, 0.33 at 0.05.)
-2. **Only `TARGET_2` runs in CI.** The other two are covered offline. Widening
-   the job matrix costs ~8 minutes each.
-3. **One run is not a distribution.** The mission has a stochastic element in
-   how many frames catch each station; the `gazebo-e2e` job is not yet run
-   repeatedly enough to quote a success rate.
+2. **Nine runs are still not a statistical success-rate study.** Every workflow
+   runs all three targets three times (`3 targets × 3 trials`) and requires all
+   nine verdicts to be `MISSION_SUCCESS`. That catches target-specific defects
+   and obvious flakiness, but `n=3` per target is too small for a meaningful
+   reliability percentage.
+3. **The CI world is deterministic.** The trials exercise renderer and callback
+   timing variation, but they do not randomise station layouts, obstacle
+   geometry, sensor noise or initial pose.
 4. **gz-sim plugin filenames** (`gz-sim-velocity-control-system`, etc.) are the
    Harmonic spellings and differ in Garden/Fortress.
 5. **No GUI run.** CI runs `headless:=true` (server only). The GUI path and the

@@ -119,7 +119,7 @@ jobs:
           colcon test-result --verbose
 
   gazebo-e2e:
-    name: Gazebo Harmonic end-to-end mission
+    name: Gazebo E2E ${{ matrix.target }} (trial ${{ matrix.trial }}/3)
     needs: ros-build
     runs-on: ubuntu-24.04
     timeout-minutes: 150
@@ -137,8 +137,13 @@ jobs:
       GZ_IP: 127.0.0.1
     strategy:
       fail-fast: false
+      # Nine independent missions are required, but avoid requesting nine
+      # software-rendering runners at once. A green matrix means every target
+      # reached MISSION_SUCCESS in all three trials.
+      max-parallel: 3
       matrix:
-        target: [TARGET_2]
+        target: [TARGET_1, TARGET_2, TARGET_3]
+        trial: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - name: Install ROS and rendering dependencies
@@ -171,6 +176,9 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           source ros2_ws/install/setup.bash
           mkdir -p logs
+          printf 'target=%s\ntrial=%s\nworkflow_run=%s\n' \
+            '${{ matrix.target }}' '${{ matrix.trial }}' "$GITHUB_RUN_ID" \
+            > logs/matrix.txt
 
           # auto_start:=false so the vehicles stay at their spawn poses long
           # enough for the map->odom transforms to be checked against them.
@@ -210,7 +218,11 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           source ros2_ws/install/setup.bash
 
-          ros2 action send_goal /mission/run_mission             mission_interfaces/action/RunMission "{target_qr: '${{ matrix.target }}'}"             > logs/action.log 2>&1 &
+          ros2 action send_goal \
+            /mission/run_mission \
+            mission_interfaces/action/RunMission \
+            "{target_qr: '${{ matrix.target }}'}" \
+            > logs/action.log 2>&1 &
 
           # Which stage of the data path is the first to go quiet?
           ros2 run mission_bringup check_pipeline.py --timeout 900 \
@@ -242,5 +254,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gazebo-e2e-${{ matrix.target }}-logs
+          name: gazebo-e2e-${{ matrix.target }}-trial-${{ matrix.trial }}-logs
           path: logs/

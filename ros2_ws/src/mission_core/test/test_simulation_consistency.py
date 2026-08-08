@@ -43,6 +43,7 @@ CONFIG_PATH = BRINGUP / "config" / "mission.yaml"
 WORLD_PATH = BRINGUP / "worlds" / "mission_arena.sdf"
 LAUNCH_PATH = BRINGUP / "launch" / "mission.launch.py"
 BRIDGE_PATH = BRINGUP / "config" / "gz_bridge.yaml"
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 #: Every quantity below is a length in metres; 1 mm is far tighter than any
 #: physical tolerance that matters here and catches copy-paste drift.
@@ -535,6 +536,34 @@ def test_launch_file_starts_every_mission_node() -> None:
         assert executable in text, f"{executable} is never launched"
     # Two detector instances: one per camera.
     assert text.count("qr_detector_node") >= 2
+
+
+def test_gazebo_ci_matrix_repeats_every_configured_target() -> None:
+    """A green CI run must cover target-specific behaviour and basic flakiness."""
+    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["gazebo-e2e"]
+    strategy = job["strategy"]
+    matrix = strategy["matrix"]
+    config = load_mission_config(CONFIG_PATH)
+
+    assert set(matrix["target"]) == set(config.mission.known_payloads)
+    assert matrix["trial"] == [1, 2, 3]
+    assert strategy["fail-fast"] is False
+    assert strategy["max-parallel"] <= len(matrix["target"])
+
+
+def test_every_gazebo_matrix_job_is_gated_by_the_mission_verdict() -> None:
+    """Pipeline activity alone must never make an E2E matrix leg green."""
+    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["gazebo-e2e"]
+    commands = "\n".join(step.get("run", "") for step in job["steps"])
+    artifact_steps = [step for step in job["steps"] if step.get("uses") == "actions/upload-artifact@v4"]
+
+    assert "await_mission.py --timeout" in commands
+    assert "check_pipeline.py" in commands
+    assert len(artifact_steps) == 1
+    artifact_name = artifact_steps[0]["with"]["name"]
+    assert "matrix.target" in artifact_name and "matrix.trial" in artifact_name
 
 
 def test_setup_py_entry_points_resolve_to_real_modules() -> None:
