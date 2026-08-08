@@ -197,6 +197,16 @@ jobs:
 
           # Which stage of the data path is the first to go quiet?
           ros2 run mission_bringup check_pipeline.py --timeout 900 | tee logs/pipeline.txt
+      - name: Wait for the mission verdict
+        shell: bash
+        run: |
+          set -ex
+          source /opt/ros/jazzy/setup.bash
+          source ros2_ws/install/setup.bash
+          # THE gate for this job: exits non-zero unless the manager reached
+          # MISSION_SUCCESS, which it only does once every mandatory validator
+          # check has passed - including the rover's own QR match.
+          ros2 run mission_bringup await_mission.py --timeout 3000 | tee logs/mission.txt
       - name: Collect diagnostics
         if: always()
         shell: bash
