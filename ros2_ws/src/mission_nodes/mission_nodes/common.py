@@ -301,20 +301,45 @@ def lookup_transform(
     target_frame: str,
     source_frame: str,
     stamp: TimeMsg,
-    timeout_s: float = 0.1,
+    timeout_s: float = 0.0,
+    allow_latest_fallback: bool = True,
 ) -> Tuple[Optional[Transform], str]:
-    """Look up ``target <- source``; returns ``(transform, error_message)``.
+    """Look up ``target <- source`` at ``stamp``, falling back to the latest.
 
     Returns the error instead of raising so the caller can rate-limit its own
     logging: a missing transform during startup is normal, a persistent one is
     a fault, and only the caller knows which it is looking at.
+
+    Two deliberate choices, both learned the hard way in Gazebo:
+
+    * ``timeout_s`` defaults to zero. Blocking inside a callback of a
+      single-threaded executor cannot work: the TF listener is a callback on
+      the same executor, so nothing can arrive while the wait is in progress
+      and the lookup is guaranteed to time out. It merely wastes the wait.
+    * A sensor message is routinely stamped a few milliseconds ahead of the
+      newest transform, which raises "extrapolation into the future". Dropping
+      the data for that is far worse than using a transform 20 ms old: at rover
+      and drone speeds that is under 3 cm. One run integrated *zero* lidar
+      sweeps for exactly this reason and produced a completely empty map.
     """
     try:
         stamped = buffer_.lookup_transform(
             target_frame, source_frame, stamp, timeout=Duration(seconds=timeout_s)
         )
+        return transform_from_msg(stamped), ""
     except Exception as exc:  # tf2 raises several unrelated exception types
-        return None, f"{target_frame} <- {source_frame}: {exc}"
+        first_error = exc
+
+    if not allow_latest_fallback:
+        return None, f"{target_frame} <- {source_frame}: {first_error}"
+    try:
+        import rclpy.time
+
+        stamped = buffer_.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+    except Exception as exc:
+        # Report the *stamped* failure: it is the more informative of the two,
+        # and a fallback failure usually just means the frame does not exist.
+        return None, f"{target_frame} <- {source_frame}: {first_error}"
     return transform_from_msg(stamped), ""
 
 

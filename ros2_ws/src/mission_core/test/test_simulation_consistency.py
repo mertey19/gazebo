@@ -634,3 +634,26 @@ def test_the_frame_checker_compares_tf_against_odometry() -> None:
     text = (BRINGUP / "scripts" / "check_frames.py").read_text(encoding="utf-8")
     assert "tf_matches_odom" in text
     assert "does not agree with odometry" in text
+
+
+def test_tf_lookups_do_not_block_and_do_not_drop_late_data() -> None:
+    """TF lookups must not wait, and must not discard a slightly-late stamp.
+
+    Regression: the world model looked transforms up at the message stamp with
+    a 0.1 s timeout inside a single-threaded executor. The TF listener is a
+    callback on that same executor, so nothing could arrive during the wait and
+    the lookup always timed out; a sensor stamped a few ms ahead of the newest
+    transform then had its data thrown away. One Gazebo run integrated zero
+    lidar sweeps and produced a completely empty occupancy grid while every
+    other stage looked healthy.
+    """
+    common = (
+        REPO_ROOT / "ros2_ws" / "src" / "mission_nodes" / "mission_nodes" / "common.py"
+    ).read_text(encoding="utf-8")
+    signature = re.search(r"def lookup_transform\((.*?)\) ->", common, re.DOTALL)
+    assert signature is not None
+    assert re.search(r"timeout_s: float = 0\.0", signature.group(1)), (
+        "lookup_transform must default to a non-blocking lookup"
+    )
+    assert "allow_latest_fallback" in signature.group(1)
+    assert "rclpy.time.Time()" in common, "there must be a latest-available fallback"
