@@ -49,6 +49,31 @@ class TrackingStatus:
         return self.state in (FollowerState.GOAL_REACHED, FollowerState.FAILED)
 
 
+class SafetyStopWatchdog:
+    """Turns a sustained local-lidar stop into a bounded recovery request.
+
+    A momentary return should only suppress forward velocity. A persistent
+    return means the planned path is stale, so waiting for the much longer
+    navigation timeout is both slow and unhelpful.
+    """
+
+    def __init__(self, delay_s: float) -> None:
+        if delay_s <= 0.0:
+            raise ValueError("safety-stop replan delay must be positive")
+        self.delay_s = float(delay_s)
+        self.blocked_s = 0.0
+
+    def update(self, blocked: bool, dt: float) -> bool:
+        if not blocked:
+            self.blocked_s = 0.0
+            return False
+        self.blocked_s += max(0.0, float(dt))
+        return self.blocked_s >= self.delay_s
+
+    def reset(self) -> None:
+        self.blocked_s = 0.0
+
+
 def _closest_point_on_segment(
     point: np.ndarray, start: np.ndarray, end: np.ndarray
 ) -> tuple[np.ndarray, float]:

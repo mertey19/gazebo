@@ -12,6 +12,7 @@ from mission_core.path_following import (
     DifferentialDriveModel,
     FollowerState,
     PurePursuitController,
+    SafetyStopWatchdog,
 )
 
 
@@ -30,6 +31,26 @@ def make_controller(**overrides) -> PurePursuitController:
     )
     kwargs.update(overrides)
     return PurePursuitController(**kwargs)
+
+
+def test_safety_stop_watchdog_requests_replan_only_after_sustained_blockage() -> None:
+    watchdog = SafetyStopWatchdog(3.0)
+    assert not watchdog.update(True, 1.0)
+    assert not watchdog.update(True, 1.0)
+    assert watchdog.update(True, 1.0)
+
+
+def test_safety_stop_watchdog_resets_after_a_clear_scan() -> None:
+    watchdog = SafetyStopWatchdog(2.0)
+    assert not watchdog.update(True, 1.5)
+    assert not watchdog.update(False, 0.1)
+    assert watchdog.blocked_s == 0.0
+    assert not watchdog.update(True, 1.5)
+
+
+def test_safety_stop_watchdog_rejects_non_positive_delay() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        SafetyStopWatchdog(0.0)
 
 
 def drive(controller, rover, dt=0.05, max_time=200.0):

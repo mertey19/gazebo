@@ -368,7 +368,18 @@ class MissionManagerNode(Node):
                 f"{self.path_pub.topic_name} in frame {self.map_frame}"
             )
         elif outputs.command is MissionCommand.START_VERIFICATION:
+            # Each attempt must earn its own consecutive-read quorum; stale
+            # reads from an earlier sweep cannot complete a later attempt.
+            self._verified_qr = None
+            self._verification_reads.clear()
             self._call_trigger(self.rover_search_client, "rover verification sweep")
+        elif outputs.command is MissionCommand.PREPARE_REPLAN:
+            # The old TrackingStatus is transient-local and remains FAILED
+            # until the follower publishes for the new path. Discard it here
+            # so it cannot consume the recovery budget a second time.
+            self._tracking = None
+            self._path_published = False
+            self._stop_rover()
         elif outputs.command is MissionCommand.STOP_ROVER:
             self._stop_rover()
 

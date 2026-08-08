@@ -84,6 +84,12 @@ rover:
   navigation_timeout_s: 240.0
   control_rate_hz: 20.0
   obstacle_stop_distance_m: 0.45
+  # If a newly appeared obstacle holds the safety stop this long, refresh the
+  # route from the rover's live pose instead of waiting for navigation timeout.
+  safety_stop_replan_delay_s: 3.0
+  # Replan once from the live rover pose after a controller tracking failure.
+  # A second failure is terminal so recovery cannot loop indefinitely.
+  max_replans: 1
   camera:
     width: 640
     height: 480
@@ -114,9 +120,9 @@ planner:
   rover_radius_m: 0.30
   obstacle_safety_margin_m: 0.25
   planning_resolution_m: 0.20
-  # Unmapped cells are drivable: obstacles are respected because they were
-  # *observed* occupied, not merely because they are unknown.
-  allow_unknown: true
+  # Fail closed: the rover stays inside the area the drone actually observed.
+  # Set true only when an operator deliberately accepts unknown-space travel.
+  allow_unknown: false
   heuristic_weight: 1.0
   shortcut: true
   approach_distance_m: 1.8
@@ -138,3 +144,6 @@ verification:
   # 0.4 rad off-axis already falls outside the 1.2 rad camera.
   search_sweep_rad: 1.05
   search_yaw_rate_rad_s: 0.4
+  # Retry one complete sweep when no code is decoded. A confidently decoded
+  # wrong payload still fails immediately.
+  max_attempts: 2

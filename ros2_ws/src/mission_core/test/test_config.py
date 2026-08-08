@@ -80,6 +80,20 @@ def test_goal_tolerance_must_stay_inside_the_approach_distance() -> None:
     assert any("approach_distance_m" in p for p in bad.validate())
 
 
+def test_recovery_budgets_are_bounded() -> None:
+    config = MissionConfig()
+    negative_replans = replace(config, rover=replace(config.rover, max_replans=-1))
+    no_verification_attempts = replace(
+        config, verification=replace(config.verification, max_attempts=0)
+    )
+    no_safety_delay = replace(
+        config, rover=replace(config.rover, safety_stop_replan_delay_s=0.0)
+    )
+    assert any("max_replans" in p for p in negative_replans.validate())
+    assert any("max_attempts" in p for p in no_verification_attempts.validate())
+    assert any("safety_stop_replan_delay_s" in p for p in no_safety_delay.validate())
+
+
 def test_unknown_requested_payload_is_rejected() -> None:
     config = MissionConfig()
     bad = replace(config, mission=replace(config.mission, target_qr="TARGET_42"))
@@ -93,6 +107,7 @@ def test_derived_quantities_are_consistent() -> None:
     )
     assert config.camera_ground_footprint_m() > config.drone.lane_spacing_m
     assert 0.0 < config.code_size_m("TARGET_1") < config.mission.qr_plate_size_m
+    assert config.planner.allow_unknown is False
 
 
 def test_planner_resolution_coarser_than_the_rover_is_rejected() -> None:

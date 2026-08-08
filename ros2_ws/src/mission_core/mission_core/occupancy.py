@@ -19,6 +19,35 @@ FREE = 0
 OCCUPIED = 100
 
 
+def planar_scan_hit_points(
+    ranges: Sequence[float],
+    *,
+    angle_min: float,
+    angle_increment: float,
+    range_min: float,
+    range_max: float,
+) -> np.ndarray:
+    """Convert valid 2D lidar hits into sensor-frame ``(x, y, 0)`` points.
+
+    Infinite and maximum-range readings mean "no return" and are deliberately
+    excluded; treating them as endpoints would create a ring of fake walls.
+    """
+    values = np.asarray(ranges, dtype=float)
+    if values.size == 0:
+        return np.empty((0, 3), dtype=float)
+    angles = float(angle_min) + np.arange(values.size) * float(angle_increment)
+    valid = (
+        np.isfinite(values)
+        & (values >= float(range_min))
+        & (values < float(range_max))
+    )
+    values = values[valid]
+    angles = angles[valid]
+    return np.column_stack(
+        (values * np.cos(angles), values * np.sin(angles), np.zeros(values.size))
+    )
+
+
 @dataclass(frozen=True)
 class GridMetadata:
     """Geometry of an occupancy grid in the ``map`` frame."""
@@ -315,6 +344,12 @@ class OccupancyMapper:
         self.hit_ratio_threshold = float(hit_ratio_threshold)
         self._hits = np.zeros((metadata.height, metadata.width), dtype=np.int32)
         self._misses = np.zeros((metadata.height, metadata.width), dtype=np.int32)
+        # Local rover lidar is direct evidence that a path changed after the
+        # drone mapped it. Keep that evidence separate from historical ground
+        # misses so a new obstacle is not diluted by the old free-space ratio.
+        self._runtime_obstacle_hits = np.zeros(
+            (metadata.height, metadata.width), dtype=np.int32
+        )
         self._max_height = np.zeros((metadata.height, metadata.width), dtype=np.float32)
 
     def integrate(self, points_map: np.ndarray) -> int:
@@ -348,6 +383,36 @@ class OccupancyMapper:
         )
         return int(rows.size)
 
+    def integrate_runtime_obstacle_hits(self, points_map: np.ndarray) -> int:
+        """Add direct obstacle endpoints from a local planar lidar.
+
+        Two consistent hits (or the configured ``min_hits``) override earlier
+        ground/free observations. Evidence is intentionally sticky; removing
+        moving obstacles requires the decay model documented as future work.
+        """
+        pts = np.asarray(points_map, dtype=float)
+        if pts.size == 0:
+            return 0
+        pts = np.atleast_2d(pts)
+        if pts.shape[1] != 3:
+            raise ValueError(f"expected (N, 3) points, got {pts.shape}")
+        pts = pts[np.isfinite(pts).all(axis=1)]
+        if pts.size == 0:
+            return 0
+
+        meta = self.metadata
+        cols = np.floor((pts[:, 0] - meta.origin_x) / meta.resolution).astype(int)
+        rows = np.floor((pts[:, 1] - meta.origin_y) / meta.resolution).astype(int)
+        inside = (rows >= 0) & (rows < meta.height) & (cols >= 0) & (cols < meta.width)
+        rows, cols = rows[inside], cols[inside]
+        np.add.at(self._runtime_obstacle_hits, (rows, cols), 1)
+        np.maximum.at(
+            self._max_height,
+            (rows, cols),
+            pts[inside, 2].astype(np.float32),
+        )
+        return int(rows.size)
+
     def build(self) -> OccupancyGrid:
         """Threshold the accumulated evidence into an occupancy grid."""
         grid = OccupancyGrid(self.metadata)
@@ -356,6 +421,9 @@ class OccupancyMapper:
         ratio = np.zeros_like(self._hits, dtype=float)
         np.divide(self._hits, np.maximum(total, 1), out=ratio)
         occupied = observed & (self._hits >= self.min_hits) & (ratio >= self.hit_ratio_threshold)
+        runtime_occupied = self._runtime_obstacle_hits >= self.min_hits
+        observed |= self._runtime_obstacle_hits > 0
+        occupied |= runtime_occupied
         grid.data[observed] = np.int8(FREE)
         grid.data[occupied] = np.int8(OCCUPIED)
         return grid

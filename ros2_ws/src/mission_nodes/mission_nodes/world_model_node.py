@@ -16,11 +16,11 @@ import numpy as np
 import rclpy
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
 from visualization_msgs.msg import Marker, MarkerArray
 
-from mission_core.occupancy import GridMetadata, OccupancyMapper
+from mission_core.occupancy import GridMetadata, OccupancyMapper, planar_scan_hit_points
 from mission_core.world_model import TargetObservation, TargetStatus, WorldModel
 
 from mission_interfaces.msg import (
@@ -58,6 +58,7 @@ class WorldModelNode(Node):
             ["/perception/drone/qr_observations", "/perception/rover/qr_observations"],
         )
         self.declare_parameter("point_cloud_topic", "/drone/scan/points")
+        self.declare_parameter("laser_scan_topic", "/rover/scan")
         self.declare_parameter("publish_markers", True)
 
         frames = self.config.frames
@@ -105,6 +106,12 @@ class WorldModelNode(Node):
             PointCloud2,
             str(self.get_parameter("point_cloud_topic").value),
             self._on_point_cloud,
+            SENSOR_QOS,
+        )
+        self.create_subscription(
+            LaserScan,
+            str(self.get_parameter("laser_scan_topic").value),
+            self._on_laser_scan,
             SENSOR_QOS,
         )
 
@@ -202,6 +209,27 @@ class WorldModelNode(Node):
         # evidence of anything and would smear fake free space across the map.
         finite = np.isfinite(points).all(axis=1)
         self.mapper.integrate(map_from_sensor.apply(points[finite]))
+
+    def _on_laser_scan(self, msg: LaserScan) -> None:
+        """Add newly encountered rover-height obstacles to the shared map."""
+        map_from_sensor, error = lookup_transform(
+            self.tf_buffer, self.map_frame, msg.header.frame_id, msg.header.stamp
+        )
+        if map_from_sensor is None:
+            self.get_logger().warn(
+                f"[WORLD_MODEL] dropping rover lidar sweep: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+        points = planar_scan_hit_points(
+            msg.ranges,
+            angle_min=msg.angle_min,
+            angle_increment=msg.angle_increment,
+            range_min=msg.range_min,
+            range_max=msg.range_max,
+        )
+        if points.size:
+            self.mapper.integrate_runtime_obstacle_hits(map_from_sensor.apply(points))
 
     def _on_get_target(self, request, response):
         record = self.world_model.get_target(request.qr_id)

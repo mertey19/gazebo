@@ -39,6 +39,10 @@ class MissionCommand(str, Enum):
     #: odometry drifts in yaw, so arriving "facing the station" can still leave
     #: it outside the camera - the rover has to look around rather than assume.
     START_VERIFICATION = "START_VERIFICATION"
+    #: Stop the current controller, discard its latched status and wait for a
+    #: newly planned path. Kept distinct from STOP_ROVER so adapters can reset
+    #: the path-publication handshake during recovery.
+    PREPARE_REPLAN = "PREPARE_REPLAN"
     STOP_ROVER = "STOP_ROVER"
 
 
@@ -116,6 +120,7 @@ class MissionOrchestrator:
         self._navigation_started_at: Optional[float] = None
         self._verification_started_at: Optional[float] = None
         self._replans = 0
+        self._verification_attempts = 0
 
     # -- helpers ----------------------------------------------------------
     @property
@@ -376,9 +381,36 @@ class MissionOrchestrator:
         self, inputs: MissionInputs, now: float, outputs: MissionOutputs
     ) -> MissionOutputs:
         if inputs.rover_tracking_failed:
+            if self._replans < self.config.rover.max_replans:
+                if inputs.rover_pose is None:
+                    return self._fail(
+                        FailureReason.LOCALIZATION_UNAVAILABLE,
+                        "rover pose is unavailable, cannot recover from tracking failure",
+                        now,
+                        outputs,
+                    )
+                self._replans += 1
+                self.rover_start_xy = np.asarray(inputs.rover_pose, dtype=float)[:2].copy()
+                self.path = None
+                self._navigation_started_at = None
+                outputs.messages.append(
+                    f"[RECOVERY] Tracking failed ({inputs.rover_failure_detail or 'no detail'}); "
+                    f"replanning from the live rover pose "
+                    f"(attempt {self._replans}/{self.config.rover.max_replans})"
+                )
+                self._advance(
+                    MissionState.PLANNING,
+                    now,
+                    outputs,
+                    f"tracking recovery {self._replans}/{self.config.rover.max_replans}",
+                )
+                outputs.command = MissionCommand.PREPARE_REPLAN
+                return outputs
             return self._fail(
                 FailureReason.PATH_TRACKING_FAILURE,
-                inputs.rover_failure_detail or "the rover reported a tracking failure",
+                (inputs.rover_failure_detail or "the rover reported a tracking failure")
+                + f"; replan budget exhausted ({self._replans}/"
+                f"{self.config.rover.max_replans})",
                 now,
                 outputs,
             )
@@ -396,6 +428,7 @@ class MissionOrchestrator:
         outputs.messages.append("[ROVER] Goal reached")
         self._advance(MissionState.VERIFYING_TARGET, now, outputs)
         self._verification_started_at = now
+        self._verification_attempts = 1
         outputs.command = MissionCommand.START_VERIFICATION
         return outputs
 
@@ -405,10 +438,20 @@ class MissionOrchestrator:
         started = self._verification_started_at or now
         if inputs.verified_qr is None:
             if now - started > self.config.verification.timeout_s:
+                if self._verification_attempts < self.config.verification.max_attempts:
+                    self._verification_attempts += 1
+                    self._verification_started_at = now
+                    outputs.messages.append(
+                        "[RECOVERY] No QR decoded; repeating the verification sweep "
+                        f"(attempt {self._verification_attempts}/"
+                        f"{self.config.verification.max_attempts})"
+                    )
+                    outputs.command = MissionCommand.START_VERIFICATION
+                    return outputs
                 return self._fail(
                     FailureReason.QR_VERIFICATION_TIMEOUT,
-                    f"the rover camera decoded no QR code within "
-                    f"{self.config.verification.timeout_s:.0f} s of arriving",
+                    f"the rover camera decoded no QR code after "
+                    f"{self._verification_attempts} verification attempt(s)",
                     now,
                     outputs,
                 )

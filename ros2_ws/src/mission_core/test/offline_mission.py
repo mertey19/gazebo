@@ -353,6 +353,12 @@ class OfflineMissionRunner:
                 self.follower.set_path(outputs.path.poses)
                 self.trace.path_xy = outputs.path.xy.copy()
                 path_published = True
+            elif outputs.command is MissionCommand.PREPARE_REPLAN:
+                self.follower.reset()
+                path_published = False
+            elif outputs.command is MissionCommand.START_VERIFICATION:
+                self._verification_hits.clear()
+                verified_qr = None
 
             if outputs.is_terminal:
                 break

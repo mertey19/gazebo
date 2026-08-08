@@ -5,7 +5,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mission_core.occupancy import FREE, OCCUPIED, GridMetadata, OccupancyGrid, OccupancyMapper
+from mission_core.occupancy import (
+    FREE,
+    OCCUPIED,
+    GridMetadata,
+    OccupancyGrid,
+    OccupancyMapper,
+    planar_scan_hit_points,
+)
 from mission_core.world_model import TargetObservation, TargetStatus, WorldModel
 
 
@@ -19,6 +26,37 @@ def observation(qr_id: str, xy, confidence: float = 0.8, stamp: float = 0.0):
         observer_position_map=np.array([0.0, 0.0, 6.0]),
         source="test",
     )
+
+
+def test_planar_scan_converts_only_real_hits_to_points() -> None:
+    points = planar_scan_hit_points(
+        [1.0, np.inf, 3.0, 4.0],
+        angle_min=0.0,
+        angle_increment=np.pi / 2.0,
+        range_min=0.2,
+        range_max=4.0,
+    )
+    assert points.shape == (2, 3)
+    assert np.allclose(points[0], [1.0, 0.0, 0.0])
+    assert np.allclose(points[1], [-3.0, 0.0, 0.0], atol=1e-12)
+
+
+def test_runtime_lidar_hits_override_old_ground_evidence() -> None:
+    mapper = OccupancyMapper(
+        GridMetadata(0.2, 20, 20, -2.0, -2.0),
+        min_hits=2,
+        hit_ratio_threshold=0.35,
+    )
+    # The drone previously classified this cell as ground many times.
+    mapper.integrate(np.repeat([[0.1, 0.1, 0.0]], 20, axis=0))
+    assert mapper.build().value_at((0.1, 0.1)) == FREE
+
+    # Two consistent rover-height endpoints mean a newly appeared obstacle;
+    # historical ground returns must not dilute that direct evidence.
+    mapper.integrate_runtime_obstacle_hits(np.array([[0.1, 0.1, 0.3]]))
+    assert mapper.build().value_at((0.1, 0.1)) == FREE
+    mapper.integrate_runtime_obstacle_hits(np.array([[0.1, 0.1, 0.3]]))
+    assert mapper.build().value_at((0.1, 0.1)) == OCCUPIED
 
 
 def test_single_observation_is_stored_but_not_yet_usable() -> None:

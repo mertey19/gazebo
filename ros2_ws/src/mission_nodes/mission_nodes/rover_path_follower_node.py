@@ -26,6 +26,8 @@ from mission_core.errors import FailureReason
 from mission_core.path_following import (
     FollowerState,
     PurePursuitController,
+    SafetyStopWatchdog,
+    TrackingStatus,
     VerificationSweep,
 )
 
@@ -85,6 +87,9 @@ class RoverPathFollowerNode(Node):
             self.config.verification.search_sweep_rad,
             self.config.verification.search_yaw_rate_rad_s,
         )
+        self._safety_watchdog = SafetyStopWatchdog(
+            rover.safety_stop_replan_delay_s
+        )
         self._searching = False
 
         self._pose: Optional[np.ndarray] = None
@@ -139,6 +144,7 @@ class RoverPathFollowerNode(Node):
             )
             return
         self.controller.set_path(poses)
+        self._safety_watchdog.reset()
         self._terminal_logged = False
         self._last_step_s = None
         self.get_logger().info(
@@ -196,6 +202,7 @@ class RoverPathFollowerNode(Node):
 
     def _on_stop(self, _request, response):
         self.controller.reset()
+        self._safety_watchdog.reset()
         self._searching = False
         self.cmd_pub.publish(Twist())
         response.success = True
@@ -226,8 +233,29 @@ class RoverPathFollowerNode(Node):
 
         # The safety stop suppresses forward motion but leaves rotation
         # available, so the rover can still turn away rather than deadlock.
-        if self._safety_blocked and linear > 0.0 and not status.is_terminal:
+        blocked_forward_motion = (
+            self._safety_blocked and linear > 0.0 and not status.is_terminal
+        )
+        if blocked_forward_motion:
             linear = 0.0
+        if self._safety_watchdog.update(blocked_forward_motion, dt):
+            status = TrackingStatus(
+                state=FollowerState.FAILED,
+                linear_velocity=0.0,
+                angular_velocity=0.0,
+                distance_to_goal_m=status.distance_to_goal_m,
+                cross_track_error_m=status.cross_track_error_m,
+                heading_error_rad=status.heading_error_rad,
+                progress_index=status.progress_index,
+                failure_reason=FailureReason.PATH_TRACKING_FAILURE,
+                detail=(
+                    f"safety lidar blocked forward motion for "
+                    f"{self._safety_watchdog.blocked_s:.1f} s "
+                    f"at {self._min_forward_range:.2f} m; requesting a replan"
+                ),
+            )
+            linear = 0.0
+            angular = 0.0
 
         twist = Twist()
         twist.linear.x = float(linear)

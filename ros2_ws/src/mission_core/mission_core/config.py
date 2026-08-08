@@ -105,6 +105,13 @@ class RoverConfig:
     control_rate_hz: float = 20.0
     #: Emergency stop distance from the rover's 2D safety lidar.
     obstacle_stop_distance_m: float = 0.45
+    #: How long an obstacle may continuously suppress forward motion before
+    #: the follower asks the mission manager for a fresh plan.
+    safety_stop_replan_delay_s: float = 3.0
+    #: Number of fresh plans allowed after the controller reports that it can
+    #: no longer track the current path. A finite budget prevents recovery
+    #: from hiding a persistent localisation or control fault forever.
+    max_replans: int = 1
     camera: CameraConfig = field(
         default_factory=lambda: CameraConfig(width=640, height=480, horizontal_fov_rad=1.20)
     )
@@ -140,7 +147,9 @@ class PlannerConfig:
     rover_radius_m: float = 0.30
     obstacle_safety_margin_m: float = 0.25
     planning_resolution_m: float = 0.20
-    allow_unknown: bool = True
+    #: Fail closed: the rover may only plan through cells the mapping pass has
+    #: actually observed. Operators can explicitly relax this for exploration.
+    allow_unknown: bool = False
     heuristic_weight: float = 1.0
     shortcut: bool = True
     #: Standoff distance where the rover stops to read the station's QR code.
@@ -171,6 +180,9 @@ class VerificationConfig:
     #: camera. Sweeping costs seconds and removes the whole failure mode.
     search_sweep_rad: float = 1.05
     search_yaw_rate_rad_s: float = 0.4
+    #: Complete heading sweeps allowed before an unreadable code becomes a
+    #: terminal failure. A decoded wrong payload is never retried.
+    max_attempts: int = 2
 
 
 @dataclass(frozen=True)
@@ -263,6 +275,12 @@ class MissionConfig:
                 "verification.max_range_m must exceed planner.approach_distance_m or the "
                 "rover will reject the very code it parked in front of"
             )
+        if self.rover.max_replans < 0:
+            problems.append("rover.max_replans must not be negative")
+        if self.rover.safety_stop_replan_delay_s <= 0.0:
+            problems.append("rover.safety_stop_replan_delay_s must be positive")
+        if self.verification.max_attempts < 1:
+            problems.append("verification.max_attempts must be at least 1")
         area_min = self.mission.area_min_xy
         area_max = self.mission.area_max_xy
         if area_max[0] <= area_min[0] or area_max[1] <= area_min[1]:

@@ -8,6 +8,8 @@ station.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -211,8 +213,10 @@ def test_navigation_timeout_is_enforced() -> None:
 
 
 def test_rover_tracking_failure_aborts_the_mission() -> None:
+    config = MissionConfig()
+    config = replace(config, rover=replace(config.rover, max_replans=0))
     orchestrator = MissionOrchestrator(
-        MissionConfig(), confirmed_world_model(), requested_qr="TARGET_2"
+        config, confirmed_world_model(), requested_qr="TARGET_2"
     )
     run_to_state(orchestrator, MissionState.ROVER_NAVIGATING)
     orchestrator.update(
@@ -229,6 +233,72 @@ def test_rover_tracking_failure_aborts_the_mission() -> None:
     )
     assert orchestrator.machine.failure_reason is FailureReason.PATH_TRACKING_FAILURE
     assert "2.10" in orchestrator.machine.failure_detail
+
+
+def test_tracking_failure_replans_once_from_the_live_rover_pose() -> None:
+    config = MissionConfig()
+    orchestrator = MissionOrchestrator(
+        config, confirmed_world_model(), requested_qr="TARGET_2"
+    )
+    run_to_state(orchestrator, MissionState.ROVER_NAVIGATING)
+
+    # A new obstacle appears across the path after it was published. The rover
+    # lidar updates the shared grid before its safety watchdog requests replan.
+    stale_path = orchestrator.path.xy.copy()
+    segment_lengths = np.linalg.norm(np.diff(stale_path, axis=0), axis=1)
+    blocked_segment = int(np.argmax(segment_lengths))
+    new_obstacle = 0.5 * (
+        stale_path[blocked_segment] + stale_path[blocked_segment + 1]
+    )
+    grid = orchestrator.world_model.occupancy
+    assert grid is not None
+    grid.mark_box(new_obstacle, (0.8, 0.8))
+    orchestrator.world_model.set_occupancy(grid)
+
+    recovery_pose = stale_path[0]
+    outputs = orchestrator.update(
+        MissionInputs(
+            now=50.0,
+            rover_pose=recovery_pose,
+            path_published=True,
+            rover_tracking_failed=True,
+            rover_failure_detail="cross-track error 2.10 m",
+        )
+    )
+    assert orchestrator.state is MissionState.PLANNING
+    assert outputs.command is MissionCommand.PREPARE_REPLAN
+    assert np.allclose(orchestrator.rover_start_xy, recovery_pose)
+    assert orchestrator._replans == 1
+    assert "replanning" in outputs.messages[0]
+
+    # The replacement path begins at the live recovery pose and is accepted.
+    orchestrator.update(MissionInputs(now=50.1, rover_pose=recovery_pose))
+    assert orchestrator.state is MissionState.PATH_READY
+    outputs = orchestrator.update(MissionInputs(now=50.2, rover_pose=recovery_pose))
+    assert outputs.command is MissionCommand.PUBLISH_PATH
+    assert outputs.path is not None
+    assert np.linalg.norm(outputs.path.xy[0] - recovery_pose) <= config.rover.goal_tolerance_m
+    assert orchestrator.planner.inflate(grid).path_is_free(
+        outputs.path.xy, unknown_is_occupied=True
+    )
+    orchestrator.update(
+        MissionInputs(now=50.3, rover_pose=recovery_pose, path_published=True)
+    )
+    assert orchestrator.state is MissionState.ROVER_NAVIGATING
+
+    # A persistent fault exhausts the finite budget instead of looping.
+    orchestrator.update(
+        MissionInputs(
+            now=50.4,
+            rover_pose=recovery_pose,
+            path_published=True,
+            rover_tracking_failed=True,
+            rover_failure_detail="persistent controller fault",
+        )
+    )
+    assert orchestrator.state is MissionState.MISSION_FAILED
+    assert orchestrator.machine.failure_reason is FailureReason.PATH_TRACKING_FAILURE
+    assert "budget exhausted" in orchestrator.machine.failure_detail
 
 
 # ---------------------------------------------------------------------------
@@ -273,13 +343,21 @@ def test_verification_accepts_the_right_payload() -> None:
     assert "[MISSION] SUCCESS" in outputs.messages
 
 
-def test_verification_times_out_when_no_code_is_readable() -> None:
+def test_verification_retries_then_times_out_when_no_code_is_readable() -> None:
     orchestrator, base = _reach_verification("TARGET_2")
     config = MissionConfig()
-    orchestrator.update(
+    outputs = orchestrator.update(
         MissionInputs(now=60.0 + config.verification.timeout_s + 1.0, **base)
     )
+    assert orchestrator.state is MissionState.VERIFYING_TARGET
+    assert outputs.command is MissionCommand.START_VERIFICATION
+    assert "attempt 2/2" in outputs.messages[0]
+
+    orchestrator.update(
+        MissionInputs(now=61.0 + 2.0 * config.verification.timeout_s + 1.0, **base)
+    )
     assert orchestrator.machine.failure_reason is FailureReason.QR_VERIFICATION_TIMEOUT
+    assert "2 verification attempt" in orchestrator.machine.failure_detail
 
 
 def test_position_alone_never_produces_success() -> None:

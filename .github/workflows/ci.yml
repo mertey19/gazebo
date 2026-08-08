@@ -213,7 +213,8 @@ jobs:
           ros2 action send_goal /mission/run_mission             mission_interfaces/action/RunMission "{target_qr: '${{ matrix.target }}'}"             > logs/action.log 2>&1 &
 
           # Which stage of the data path is the first to go quiet?
-          ros2 run mission_bringup check_pipeline.py --timeout 900 \n            --save-images logs/frames | tee logs/pipeline.txt
+          ros2 run mission_bringup check_pipeline.py --timeout 900 \
+            --save-images logs/frames | tee logs/pipeline.txt
       - name: Wait for the mission verdict
         shell: bash
         run: |
@@ -233,7 +234,8 @@ jobs:
           # Capture what each camera is looking at right now. If the rover
           # failed to verify, this says whether it was staring at a blank
           # buffer, at empty ground, or at a code it could not decode.
-          ros2 run mission_bringup check_pipeline.py --timeout 30 \n            --save-images logs/frames_final > logs/pipeline_final.txt 2>&1 || true
+          ros2 run mission_bringup check_pipeline.py --timeout 30 \
+            --save-images logs/frames_final > logs/pipeline_final.txt 2>&1 || true
           ros2 run mission_bringup check_frames.py > logs/frames_check.txt 2>&1 || true
           ros2 topic echo /mission/status --once > logs/final_status.txt 2>&1 || true
           tail -400 logs/launch.log || true

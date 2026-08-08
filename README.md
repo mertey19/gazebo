@@ -17,9 +17,9 @@ The mission is **not** told where `TARGET_2` is. It has to find it.
 
 | Layer | Status |
 |---|---|
-| `mission_core` algorithms (QR/PnP, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed and tested.** 128 tests, including a full end-to-end mission per target. |
+| `mission_core` algorithms (QR/PnP, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed and tested.** 150 tests, including a full end-to-end mission per target. |
 | Offline mission harness (renders real QR textures through a real pinhole camera, ray-casts a lidar, integrates unicycle kinematics) | **Executed.** Drives the production pipeline with zero simulator. Reproduce with `python scripts/run_offline_mission.py`. |
-| Gazebo world, SDF models, `ros_gz` bridge, launch file, ROS 2 nodes | **Written, not executed.** 29 of the 128 tests are static cross-file consistency checks over exactly these files (§7). |
+| Gazebo world, SDF models, `ros_gz` bridge, launch file, ROS 2 nodes | **Written, not executed on the development host.** 34 of the 150 tests are static cross-file consistency checks over exactly these files (§7); CI also contains a Gazebo end-to-end job (§11). |
 
 The development host is Windows 11 with no WSL2 and no Docker, so ROS 2 and
 gz-sim cannot be installed on it. Every claim in this README about the
@@ -135,7 +135,7 @@ ros2_ws/src/
 │   │   ├── qr.py              decode + PnP marker pose
 │   │   ├── validation.py      the success criteria
 │   │   └── world_model.py     the digital twin
-│   └── test/                  128 tests, incl. sim_harness/offline_mission
+│   └── test/                  150 tests, incl. sim_harness/offline_mission
 ├── mission_interfaces/    9 msgs, 2 srvs, 1 action
 ├── mission_nodes/         5 rclpy nodes (thin adapters over mission_core)
 └── mission_bringup/       world, models, config, launch, rviz, frame checker
@@ -164,9 +164,12 @@ scripts/generate_qr_targets.py   generates the station models from mission.yaml
 6. **PATH_READY → SENDING_PATH** — publish `nav_msgs/Path` on
    `/mission/rover_path` (transient-local, so a late subscriber still gets it).
 7. **ROVER_NAVIGATING** — pure pursuit, with a cross-track watchdog and a
-   navigation timeout.
+   navigation timeout. A tracking failure stops the rover and replans once
+   from its live pose; a repeated failure aborts instead of looping forever.
 8. **VERIFYING_TARGET** — the rover's own camera must decode the same payload,
    `required_consecutive_reads` times, within `verification.max_range_m`.
+   An unreadable code gets one fresh heading sweep; a wrong decoded payload
+   still fails immediately.
 9. **MISSION_SUCCESS** — only after every mandatory validator check passes.
 
 Any step can transition to **MISSION_FAILED** with a named
@@ -348,7 +351,7 @@ for PnP cannot drift apart.
 No ROS installation required — `mission_core` is deliberately ROS-free:
 
 ```bash
-python -m pytest                          # everything (128 tests, ~2 min)
+python -m pytest                          # everything (150 tests, ~2 min)
 python -m pytest -m "not integration"     # fast unit tests only (~3 s)
 python -m pytest -m integration -v        # full end-to-end mission runs
 ```
@@ -495,9 +498,11 @@ Ubuntu run should check:
   or SLAM. `map → odom` is static, so odometry drift would accumulate
   uncorrected. This is the standard MVP simplification; note that it concerns
   *self*-localisation only — target positions are always perceived.
-* **Obstacles are static.** The architecture does not preclude dynamic ones:
-  the mapper accumulates per-cell evidence and the planner re-reads the grid on
-  every plan. What is missing is evidence *decay* and replanning-on-change.
+* **The Gazebo scenario's obstacles are static.** At runtime, a newly appeared
+  obstacle is added to the shared map from the rover lidar; a sustained safety
+  stop triggers a bounded replan from the live rover pose. Runtime obstacle
+  evidence is currently sticky, so a moved-away obstacle is not cleared until
+  the map is reset; evidence decay remains future work.
 * **2D planning.** The rover is a ground vehicle and the arena is flat.
 * **Obstacle footprints are axis-aligned bounding boxes** from connected
   components. Fine for the boxes in this world; an L-shaped obstacle would be
@@ -505,9 +510,10 @@ Ubuntu run should check:
   this only affects the `ObstacleArray` topic and RViz.
 * **One mission at a time.** The manager rejects a new action goal while a
   mission is running.
-* **No recovery behaviours.** A tracking failure or a verification mismatch
-  ends the mission. The state machine has a `VERIFYING_TARGET → PLANNING` edge
-  reserved for retrying against another candidate, but nothing drives it yet.
+* **Bounded recovery only.** A tracking failure gets one fresh plan from the
+  live rover pose, and an unreadable QR gets one fresh heading sweep. A second
+  failure or a decoded wrong payload remains terminal. There is no general
+  behaviour-tree recovery or alternate-target search.
 
 ---
 

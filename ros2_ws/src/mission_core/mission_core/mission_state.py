@@ -51,7 +51,10 @@ _NOMINAL_TRANSITIONS: Dict[MissionState, FrozenSet[MissionState]] = {
     MissionState.PLANNING: frozenset({MissionState.PATH_READY}),
     MissionState.PATH_READY: frozenset({MissionState.SENDING_PATH}),
     MissionState.SENDING_PATH: frozenset({MissionState.ROVER_NAVIGATING}),
-    MissionState.ROVER_NAVIGATING: frozenset({MissionState.VERIFYING_TARGET}),
+    # A bounded recovery may stop the rover and plan again from its live pose.
+    MissionState.ROVER_NAVIGATING: frozenset(
+        {MissionState.VERIFYING_TARGET, MissionState.PLANNING}
+    ),
     # Verification may bounce back to planning if the rover reached a station
     # whose code does not match and another candidate is still available.
     MissionState.VERIFYING_TARGET: frozenset(
