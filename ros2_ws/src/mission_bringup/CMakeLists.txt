@@ -10,7 +10,10 @@ install(
 )
 
 install(
-  PROGRAMS scripts/check_frames.py
+  PROGRAMS
+    scripts/check_frames.py
+    scripts/check_pipeline.py
+    scripts/await_mission.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

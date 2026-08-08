@@ -1,0 +1,197 @@
+name: CI
+
+# Three levels of evidence, deliberately kept as separate jobs so it is always
+# visible which one passed:
+#
+#   1. unit-tests   - the ROS-free mission logic (mission_core).
+#   2. ros-build    - the ROS 2 layer really compiles: interfaces generate,
+#                     package dependencies resolve, entry points install.
+#   3. gazebo-e2e   - Gazebo Harmonic actually runs the mission end to end.
+#
+# A green (1) says nothing about (3). That distinction is the whole point of
+# splitting them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: mission_core unit tests (no ROS)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy opencv-python-headless pyyaml pytest
+      - name: Show versions
+        run: python -c "import cv2, numpy; print('opencv', cv2.__version__, '| numpy', numpy.__version__)"
+      - name: Run the full suite
+        run: python -m pytest -q --junit-xml=pytest-results.xml
+      - name: Run one offline mission end to end
+        run: python scripts/run_offline_mission.py --target TARGET_2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-results
+          path: pytest-results.xml
+
+  ros-build:
+    name: colcon build (ROS 2 Jazzy)
+    runs-on: ubuntu-24.04
+    container:
+      image: ros:jazzy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ROS dependencies
+        shell: bash
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3-colcon-common-extensions python3-opencv python3-numpy python3-yaml \
+            ros-jazzy-cv-bridge ros-jazzy-tf2-ros ros-jazzy-sensor-msgs-py \
+            ros-jazzy-visualization-msgs ros-jazzy-std-srvs ros-jazzy-ros-gz
+      - name: Show versions
+        shell: bash
+        run: |
+          set -eux
+          source /opt/ros/jazzy/setup.bash
+          echo "ROS_DISTRO=$ROS_DISTRO"
+          gz sim --versions || true
+          python3 -c "import cv2; print('opencv', cv2.__version__)"
+      - name: colcon build
+        shell: bash
+        run: |
+          set -eux
+          source /opt/ros/jazzy/setup.bash
+          cd ros2_ws
+          colcon build --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=Release
+      - name: Verify the interfaces and executables actually installed
+        shell: bash
+        run: |
+          set -eux
+          source /opt/ros/jazzy/setup.bash
+          source ros2_ws/install/setup.bash
+          # Generated interfaces must be introspectable, not just compiled.
+          ros2 interface show mission_interfaces/msg/QrObservation > /dev/null
+          ros2 interface show mission_interfaces/srv/PlanPath > /dev/null
+          ros2 interface show mission_interfaces/action/RunMission > /dev/null
+          # Every node entry point must resolve.
+          for exe in qr_detector_node world_model_node drone_explorer_node \
+                     mission_manager_node rover_path_follower_node; do
+            test -x "$(ros2 pkg prefix mission_nodes)/lib/mission_nodes/$exe"
+          done
+          # And the launch file must at least parse and expand.
+          ros2 launch mission_bringup mission.launch.py --show-args
+      - name: colcon test
+        shell: bash
+        run: |
+          set -eux
+          source /opt/ros/jazzy/setup.bash
+          cd ros2_ws
+          colcon test --packages-select mission_core --event-handlers console_direct+
+          colcon test-result --verbose
+
+  gazebo-e2e:
+    name: Gazebo Harmonic end-to-end mission
+    needs: ros-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ros:jazzy
+    env:
+      # GitHub runners have no GPU, so Gazebo's sensors have to render through
+      # Mesa's software rasteriser.
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: llvmpipe
+      MESA_GL_VERSION_OVERRIDE: "3.3"
+      QT_QPA_PLATFORM: offscreen
+      # Keep DDS and gz transport on loopback inside the container.
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+      GZ_IP: 127.0.0.1
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [TARGET_2]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ROS and rendering dependencies
+        shell: bash
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3-colcon-common-extensions python3-opencv python3-numpy python3-yaml \
+            ros-jazzy-cv-bridge ros-jazzy-tf2-ros ros-jazzy-tf2-tools \
+            ros-jazzy-sensor-msgs-py ros-jazzy-visualization-msgs ros-jazzy-std-srvs \
+            ros-jazzy-ros-gz \
+            xvfb libgl1-mesa-dri libglx-mesa0 mesa-utils
+      - name: Report the rendering backend
+        shell: bash
+        run: |
+          set -eux
+          xvfb-run -a glxinfo -B || echo "glxinfo unavailable"
+      - name: colcon build
+        shell: bash
+        run: |
+          set -eux
+          source /opt/ros/jazzy/setup.bash
+          cd ros2_ws
+          colcon build --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=Release
+      - name: Launch the mission and check the live pipeline
+        shell: bash
+        run: |
+          set -eux
+          source /opt/ros/jazzy/setup.bash
+          source ros2_ws/install/setup.bash
+          mkdir -p logs
+
+          # Headless: gz server only. Sensors still render, through llvmpipe.
+          xvfb-run -a --server-args="-screen 0 1600x1200x24" \
+            ros2 launch mission_bringup mission.launch.py \
+              target_qr:=${{ matrix.target }} headless:=true rviz:=false \
+              > logs/launch.log 2>&1 &
+          echo $! > logs/launch.pid
+
+          # Fail fast with a useful message if the stack never comes up.
+          for i in $(seq 1 60); do
+            if ros2 topic list 2>/dev/null | grep -q /mission/status; then break; fi
+            sleep 5
+          done
+          ros2 node list  | tee logs/nodes.txt
+          ros2 topic list | tee logs/topics.txt
+
+          # Which stage of the data path is the first to go quiet?
+          ros2 run mission_bringup check_pipeline.py --timeout 900 | tee logs/pipeline.txt
+      - name: Wait for the mission verdict
+        shell: bash
+        run: |
+          set -eux
+          source /opt/ros/jazzy/setup.bash
+          source ros2_ws/install/setup.bash
+          ros2 run mission_bringup await_mission.py --timeout 2400 | tee logs/mission.txt
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash || true
+          source ros2_ws/install/setup.bash || true
+          ros2 run mission_bringup check_frames.py > logs/frames.txt 2>&1 || true
+          ros2 topic echo /mission/status --once > logs/final_status.txt 2>&1 || true
+          tail -400 logs/launch.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gazebo-e2e-${{ matrix.target }}-logs
+          path: logs/
