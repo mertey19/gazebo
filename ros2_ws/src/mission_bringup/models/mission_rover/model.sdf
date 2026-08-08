@@ -193,10 +193,33 @@
       <max_linear_acceleration>1.5</max_linear_acceleration>
       <max_angular_acceleration>4.0</max_angular_acceleration>
       <topic>/model/mission_rover/cmd_vel</topic>
-      <odom_topic>/model/mission_rover/odometry</odom_topic>
-      <tf_topic>/model/mission_rover/tf</tf_topic>
+      <!-- DiffDrive's own odometry is dead-reckoned from wheel encoders and
+           is deliberately NOT used: over a 15 m drive with turns it drifted
+           far enough that the rover tracked its path perfectly (cross-track
+           0.00 m) while physically sitting 0.27 m inside the planner's
+           clearance, tripping the emergency stop, and placed a QR observation
+           1.51 m from where the drone had seen the same station - just past
+           the association radius, which split one station into two and
+           triggered DUPLICATE_QR. Published to an unbridged topic so the
+           plugin stays happy and nothing consumes it. -->
+      <odom_topic>/model/mission_rover/wheel_odometry</odom_topic>
+      <tf_topic>/model/mission_rover/wheel_tf</tf_topic>
       <frame_id>rover/odom</frame_id>
       <child_frame_id>rover/base_link</child_frame_id>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+
+    <!-- Absolute localisation, matching what the drone already uses. A real
+         rover would get this from RTK GPS, a motion-capture rig or AMCL
+         against the map; in simulation it stands in for all of them. This is
+         *self*-localisation only - target positions are still perceived. -->
+    <plugin filename="gz-sim-odometry-publisher-system"
+            name="gz::sim::systems::OdometryPublisher">
+      <odom_frame>rover/odom</odom_frame>
+      <robot_base_frame>rover/base_link</robot_base_frame>
+      <odom_topic>/model/mission_rover/odometry</odom_topic>
+      <tf_topic>/model/mission_rover/tf</tf_topic>
+      <dimensions>2</dimensions>
       <odom_publish_frequency>50</odom_publish_frequency>
     </plugin>
 

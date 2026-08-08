@@ -508,9 +508,18 @@ def test_bridge_directions_are_sane(bridge_entries) -> None:
     assert into_gz == {"/drone/cmd_vel", "/rover/cmd_vel"}
 
 
+#: Plugin outputs that are intentionally produced but not bridged. DiffDrive
+#: always publishes odometry; the rover's is dead-reckoned and superseded by an
+#: OdometryPublisher, so it is routed to a dead topic rather than consumed.
+DELIBERATELY_UNBRIDGED = {
+    "/model/mission_rover/wheel_odometry",
+    "/model/mission_rover/wheel_tf",
+}
+
+
 def test_bridge_gz_topics_match_the_sdf_plugins(bridge_entries, sdf_models) -> None:
     """A renamed plugin topic would leave the bridge quietly connected to nothing."""
-    gz_topics = {entry["gz_topic_name"] for entry in bridge_entries}
+    gz_topics = {entry["gz_topic_name"] for entry in bridge_entries} | DELIBERATELY_UNBRIDGED
     for model_name, root in sdf_models.items():
         for plugin in root.iter("plugin"):
             for tag in ("topic", "odom_topic", "tf_topic"):
@@ -693,3 +702,39 @@ def test_safety_lidar_offset_matches_the_sdf(sdf_models, config) -> None:
     equal the real mounting pose rather than approximate it."""
     pose, _ = parse_pose(find_sensor(sdf_models["mission_rover"], "safety_lidar").find("pose").text)
     assert pose[0] == pytest.approx(config.rover.safety_lidar_forward_offset_m, abs=1e-6)
+
+
+def test_both_vehicles_publish_an_absolute_pose(sdf_models) -> None:
+    """Rover and drone must localise the same way.
+
+    Regression: the rover used DiffDrive's wheel odometry, which dead-reckons
+    from spawn. Over a 15 m drive its drift put the rover 0.27 m inside the
+    planner's clearance while it reported zero cross-track error, and placed a
+    QR observation 1.51 m from where the drone saw the same station - just past
+    the association radius, so one station became two and DUPLICATE_QR fired
+    after a correct verification.
+    """
+    for model in ("scout_drone", "mission_rover"):
+        publishers = [
+            plugin
+            for plugin in sdf_models[model].iter("plugin")
+            if "OdometryPublisher" in (plugin.get("name") or "")
+        ]
+        assert publishers, f"{model} has no OdometryPublisher"
+        assert publishers[0].find("odom_topic").text == f"/model/{model}/odometry"
+
+    # DiffDrive's own odometry must not reach the same topic.
+    diff_drive = [
+        plugin
+        for plugin in sdf_models["mission_rover"].iter("plugin")
+        if "DiffDrive" in (plugin.get("name") or "")
+    ][0]
+    assert diff_drive.find("odom_topic").text != "/model/mission_rover/odometry"
+
+
+def test_map_to_odom_is_identity_for_both_vehicles(launch_constants) -> None:
+    """Neither transform may re-apply a spawn offset to a world-frame pose."""
+    text = LAUNCH_PATH.read_text(encoding="utf-8")
+    for name in ("map_to_drone_odom", "map_to_rover_odom"):
+        block = text.split(f'"{name}"', 1)[1][:220]
+        assert '("0.0", "0.0", "0.0")' in block, f"{name} is not an identity translation"

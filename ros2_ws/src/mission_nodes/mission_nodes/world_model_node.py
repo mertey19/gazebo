@@ -53,9 +53,14 @@ class WorldModelNode(Node):
         super().__init__("world_model")
         self.config = declare_mission_config(self)
 
+        # Drone observations only. The rover's camera exists to *verify* a
+        # station at close range, and the mission manager consumes its
+        # observations directly for that. Feeding them into the shared map
+        # instead injects the rover's own localisation error into target
+        # positions, which is how one station once became two clusters and
+        # tripped DUPLICATE_QR after a perfectly good verification.
         self.declare_parameter(
-            "observation_topics",
-            ["/perception/drone/qr_observations", "/perception/rover/qr_observations"],
+            "observation_topics", ["/perception/drone/qr_observations"]
         )
         self.declare_parameter("point_cloud_topic", "/drone/scan/points")
         self.declare_parameter("laser_scan_topic", "/rover/scan")

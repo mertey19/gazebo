@@ -160,18 +160,21 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     # ---- static TF -------------------------------------------------------
-    # map -> drone/odom is identity because gz's OdometryPublisher reports the
-    # model's *world* pose. map -> rover/odom is the rover spawn pose because
-    # DiffDrive dead-reckons from zero at spawn. Verify both after any world
-    # change with: ros2 run mission_bringup check_frames.py
+    # Both map -> */odom are identity: each vehicle publishes its *world* pose
+    # through gz's OdometryPublisher. Verify after any world change with:
+    #   ros2 run mission_bringup check_frames.py
     static_transforms = [
         _static_tf(
             "map_to_drone_odom", "map", "drone/odom",
             ("0.0", "0.0", "0.0"), ("0.0", "0.0", "0.0", "1.0"),
         ),
+        # Identity for both vehicles: each publishes its *world* pose through
+        # gz's OdometryPublisher. The rover used DiffDrive's spawn-relative
+        # wheel odometry until its dead-reckoning drift started failing
+        # missions; see the plugin comment in mission_rover/model.sdf.
         _static_tf(
             "map_to_rover_odom", "map", "rover/odom",
-            (ROVER_SPAWN_XY[0], ROVER_SPAWN_XY[1], "0.0"), ("0.0", "0.0", "0.0", "1.0"),
+            ("0.0", "0.0", "0.0"), ("0.0", "0.0", "0.0", "1.0"),
         ),
         _static_tf(
             "drone_camera_optical", "drone/base_link", "drone/camera_optical_frame",
