@@ -122,7 +122,7 @@ jobs:
     name: Gazebo Harmonic end-to-end mission
     needs: ros-build
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 150
     container:
       image: ros:jazzy
     env:
@@ -184,12 +184,20 @@ jobs:
           ros2 node list  | tee logs/nodes.txt
           ros2 topic list | tee logs/topics.txt
 
-          # Cap the real-time factor. Physics races ahead of what llvmpipe can
-          # render, so at RTF ~1 the camera delivers well under one frame per
-          # simulated second and a station crosses the footprint almost
-          # unseen. Slowing simulated time down is the one knob that raises
-          # frames-per-simulated-second without touching the mission at all.
-          gz service -s /world/mission_arena/set_physics             --reqtype gz.msgs.Physics --reptype gz.msgs.Boolean --timeout 5000             --req 'real_time_factor: 0.15' | tee logs/set_physics.txt ||             echo "set_physics unavailable; continuing at default RTF"
+          # Cap the real-time factor so the camera keeps up with simulated time.
+          #
+          # Measured on this runner: llvmpipe renders the 1280x960 drone camera
+          # at roughly 0.1 Hz - 14 image messages against 123 camera_info in the
+          # same 133 s window, while the rover's 640x480 managed 103. At RTF
+          # 0.15 that is ~0.6 frames per *simulated* second, so a station
+          # crossing the footprint in 3.7 simulated seconds was seen twice: one
+          # short of the three sightings CONFIRMED requires, which is exactly
+          # what those runs reported. 0.05 gives ~2 frames per simulated second
+          # and ~8 sightings per pass - margin instead of luck.
+          #
+          # This slows simulated time only. Nothing about the mission, the
+          # models or the configuration changes: CI runs mission.yaml as shipped.
+          gz service -s /world/mission_arena/set_physics             --reqtype gz.msgs.Physics --reptype gz.msgs.Boolean --timeout 5000             --req 'real_time_factor: 0.05' | tee logs/set_physics.txt ||             echo "set_physics unavailable; continuing at default RTF"
 
           # Show which configuration each node actually loaded.
           grep -h "\[CONFIG\]\|explorer ready" logs/launch.log | tee logs/config.txt || true
@@ -216,7 +224,7 @@ jobs:
           # THE gate for this job: exits non-zero unless the manager reached
           # MISSION_SUCCESS, which it only does once every mandatory validator
           # check has passed - including the rover's own QR match.
-          ros2 run mission_bringup await_mission.py --timeout 3000 | tee logs/mission.txt
+          ros2 run mission_bringup await_mission.py --timeout 4500 | tee logs/mission.txt
       - name: Collect diagnostics
         if: always()
         shell: bash
