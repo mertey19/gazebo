@@ -110,3 +110,60 @@ def test_nested_sections_can_be_overridden_individually(tmp_path: Path) -> None:
     # Untouched values inside the same section keep their defaults.
     assert config.drone.scan_speed_mps == DroneConfig().scan_speed_mps
     assert config.mission.target_qr == MissionConfigSection().target_qr
+
+
+# ---------------------------------------------------------------------------
+# The CI overlay
+# ---------------------------------------------------------------------------
+
+CI_CONFIG = REPO_ROOT / "ros2_ws" / "src" / "mission_bringup" / "config" / "mission_ci.yaml"
+
+#: The only value the CI overlay may change. A GPU-less runner renders too few
+#: frames per metre flown, and flying slower is the honest compensation.
+#: Anything else would mean a green CI stopped implying the shipped mission works.
+CI_ALLOWED_OVERRIDES = {"drone.scan_speed_mps"}
+
+
+def _flatten_config(data: dict, prefix: str = "") -> dict:
+    flat = {}
+    for key, value in data.items():
+        name = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(_flatten_config(value, name))
+        else:
+            flat[name] = value
+    return flat
+
+
+def test_ci_overlay_loads_and_validates() -> None:
+    assert CI_CONFIG.is_file(), f"missing {CI_CONFIG}"
+    assert load_mission_config(CI_CONFIG).validate() == []
+
+
+def test_ci_overlay_only_relaxes_scan_speed() -> None:
+    """CI must not be made to pass by weakening what the mission checks."""
+    shipped = _flatten_config(config_to_dict(load_mission_config(SHIPPED_CONFIG)))
+    ci = _flatten_config(config_to_dict(load_mission_config(CI_CONFIG)))
+
+    differing = {k for k in shipped if shipped[k] != ci[k]}
+    assert differing, "the CI overlay no longer overrides anything"
+    unexpected = differing - CI_ALLOWED_OVERRIDES
+    assert not unexpected, (
+        f"the CI overlay changes {sorted(unexpected)}, which is not allowed. "
+        "If that is intentional, justify it in CI_ALLOWED_OVERRIDES."
+    )
+    # Slower, never faster: the whole point is more frames per metre.
+    assert ci["drone.scan_speed_mps"] < shipped["drone.scan_speed_mps"]
+
+
+def test_ci_overlay_keeps_perception_and_safety_identical() -> None:
+    shipped = load_mission_config(SHIPPED_CONFIG)
+    ci = load_mission_config(CI_CONFIG)
+
+    assert config_to_dict(ci.perception) == config_to_dict(shipped.perception)
+    assert config_to_dict(ci.planner) == config_to_dict(shipped.planner)
+    assert config_to_dict(ci.verification) == config_to_dict(shipped.verification)
+    assert config_to_dict(ci.world_model) == config_to_dict(shipped.world_model)
+    assert config_to_dict(ci.drone.camera) == config_to_dict(shipped.drone.camera)
+    assert ci.drone.scan_altitude_m == shipped.drone.scan_altitude_m
+    assert ci.drone.finish_scan_after_target_found is True

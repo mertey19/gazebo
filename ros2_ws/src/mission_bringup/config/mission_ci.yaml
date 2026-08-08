@@ -1,0 +1,32 @@
+# Overrides for a runner with no GPU. This is a partial file merged onto the
+# shipped defaults, so every value absent here is exactly what
+# config/mission.yaml specifies.
+#
+# Why this file exists
+# --------------------
+# What matters for target confirmation is not frames per second but frames per
+# metre flown: sightings per pass = camera_rate / scan_speed x footprint.
+#
+# Measured on a GitHub runner, Gazebo renders the 1280x960 drone camera through
+# Mesa's llvmpipe at ~0.7 frames per *simulated* second instead of the
+# configured 6, and drops the triggers it cannot service. At the shipped
+# 1.6 m/s that is ~0.44 frames per metre, so a station crossing the ~5.9 m
+# usable footprint is seen 2-3 times - right on the three sightings
+# world_model.min_observations requires, and runs passed or failed by luck.
+#
+# Capping the simulator's real-time factor does NOT help: rendering is
+# wall-clock bound, so slowing simulated time only makes Gazebo drop more
+# frames per simulated second (measured: 0.7 at RTF 0.15, 0.33 at RTF 0.05).
+# Flying slower does help, because it buys more frames per metre.
+#
+# What is deliberately NOT changed
+# --------------------------------
+# Nothing that decides whether the mission is *correct*: camera resolution and
+# scan altitude (so QR decodability is untouched), min_observations and
+# min_confidence (so confirmation is as strict as shipped), the planner's rover
+# radius, safety margin and clearance, the goal tolerance, and every QR
+# verification rule. test_ci_overlay_only_relaxes_scan_speed enforces this.
+
+drone:
+  # ~1.4 frames per metre, so ~8 sightings per pass: margin instead of luck.
+  scan_speed_mps: 0.5

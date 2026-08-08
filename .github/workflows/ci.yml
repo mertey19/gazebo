@@ -175,7 +175,18 @@ jobs:
           # auto_start:=false so the vehicles stay at their spawn poses long
           # enough for the map->odom transforms to be checked against them.
           # Headless: gz server only; sensors still render, through llvmpipe.
-          xvfb-run -a --server-args="-screen 0 1600x1200x24"             ros2 launch mission_bringup mission.launch.py               target_qr:=${{ matrix.target }} headless:=true rviz:=false               auto_start:=false               > logs/launch.log 2>&1 &
+          #
+          # mission_ci.yaml is a partial overlay that only slows the scan. What
+          # limits target confirmation here is frames per *metre flown*, not
+          # frames per second: llvmpipe delivers ~0.7 frames per simulated
+          # second, so at the shipped 1.6 m/s a station is seen 2-3 times, right
+          # on the three sightings CONFIRMED needs. Capping the simulator's
+          # real-time factor does not help - rendering is wall-clock bound, so
+          # Gazebo simply drops more frames per simulated second (measured: 0.7
+          # at RTF 0.15, 0.33 at RTF 0.05). Flying slower does help.
+          CI_CONFIG="$PWD/ros2_ws/src/mission_bringup/config/mission_ci.yaml"
+          test -f "$CI_CONFIG"
+          nohup xvfb-run -a --server-args="-screen 0 1600x1200x24" ros2 launch mission_bringup mission.launch.py target_qr:=${{ matrix.target }} headless:=true rviz:=false auto_start:=false "config_file:=$CI_CONFIG" > logs/launch.log 2>&1 &
 
           for i in $(seq 1 60); do
             if ros2 topic list 2>/dev/null | grep -q /mission/status; then break; fi
@@ -184,23 +195,11 @@ jobs:
           ros2 node list  | tee logs/nodes.txt
           ros2 topic list | tee logs/topics.txt
 
-          # Cap the real-time factor so the camera keeps up with simulated time.
-          #
-          # Measured on this runner: llvmpipe renders the 1280x960 drone camera
-          # at roughly 0.1 Hz - 14 image messages against 123 camera_info in the
-          # same 133 s window, while the rover's 640x480 managed 103. At RTF
-          # 0.15 that is ~0.6 frames per *simulated* second, so a station
-          # crossing the footprint in 3.7 simulated seconds was seen twice: one
-          # short of the three sightings CONFIRMED requires, which is exactly
-          # what those runs reported. 0.05 gives ~2 frames per simulated second
-          # and ~8 sightings per pass - margin instead of luck.
-          #
-          # This slows simulated time only. Nothing about the mission, the
-          # models or the configuration changes: CI runs mission.yaml as shipped.
-          gz service -s /world/mission_arena/set_physics             --reqtype gz.msgs.Physics --reptype gz.msgs.Boolean --timeout 5000             --req 'real_time_factor: 0.05' | tee logs/set_physics.txt ||             echo "set_physics unavailable; continuing at default RTF"
-
-          # Show which configuration each node actually loaded.
-          grep -h "\[CONFIG\]\|explorer ready" logs/launch.log | tee logs/config.txt || true
+          # Confirm the overlay actually reached the nodes. A launch argument
+          # that silently fails to apply has cost two full runs already.
+          grep -h "\[CONFIG\]\|explorer ready" logs/launch.log | tee logs/config.txt
+          grep -q "mission_ci.yaml" logs/config.txt
+          grep -q "scan speed 0.50 m/s" logs/config.txt
 
           # Meaningful only while the vehicles are still parked.
           ros2 run mission_bringup check_frames.py | tee logs/frames.txt
