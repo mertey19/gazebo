@@ -478,3 +478,46 @@ def test_mission_timeout_stops_a_stuck_mission() -> None:
         MissionInputs(now=config.mission.mission_timeout_s + 1.0, drone_ready=True)
     )
     assert orchestrator.machine.failure_reason is FailureReason.MISSION_TIMEOUT
+
+
+def test_validation_uses_the_map_the_path_was_planned_against() -> None:
+    """An obstacle discovered *after* planning must not condemn the path.
+
+    Regression from a Gazebo run: the rover drove its route, arrived, and
+    verified TARGET_2 correctly - and the mission was then failed with
+    PATH_INTERSECTS_OBSTACLE, because the rover's own lidar had meanwhile
+    added cells to the shared map and the validator re-checked the old path
+    against the new grid. A path can only ever be judged on what was known
+    when it was made; a genuinely new obstacle on the remaining route is
+    handled live by the replan path instead.
+    """
+    model = confirmed_world_model()
+    orchestrator = MissionOrchestrator(MissionConfig(), model, requested_qr="TARGET_2")
+    run_to_state(orchestrator, MissionState.ROVER_NAVIGATING)
+    assert orchestrator.path is not None
+    assert orchestrator.planning_occupancy is not None
+
+    # After planning, drop a fresh obstacle right on top of the accepted path.
+    grid = model.occupancy
+    assert grid is not None
+    midpoint = orchestrator.path.xy[len(orchestrator.path.xy) // 2]
+    late = grid.copy()
+    late.mark_box(midpoint, (2.0, 2.0))
+    model.set_occupancy(late)
+
+    base = dict(
+        drone_ready=True,
+        drone_at_scan_altitude=True,
+        exploration_complete=True,
+        rover_pose=orchestrator.path.xy[-1],
+        path_published=True,
+        rover_goal_reached=True,
+    )
+    orchestrator.update(MissionInputs(now=60.0, **base))
+    outputs = orchestrator.update(MissionInputs(now=61.0, verified_qr="TARGET_2", **base))
+
+    assert orchestrator.state is MissionState.MISSION_SUCCESS, (
+        f"failed with {orchestrator.machine.failure_reason}: "
+        f"{orchestrator.machine.failure_detail}"
+    )
+    assert outputs.report is not None and outputs.report.passed

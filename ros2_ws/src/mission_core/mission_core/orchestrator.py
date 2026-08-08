@@ -114,6 +114,14 @@ class MissionOrchestrator:
         #: Rover pose captured when planning started - the path must begin here.
         self.rover_start_xy: Optional[np.ndarray] = None
         self.rover_final_xy: Optional[np.ndarray] = None
+        #: The occupancy grid the accepted path was planned against. The
+        #: validator must judge the path on what was known when it was made,
+        #: not on obstacles discovered afterwards - the rover's own lidar adds
+        #: cells while it drives, and a path can only ever have been checked
+        #: against the map that existed at planning time. A new obstacle on the
+        #: remaining route is handled live, by the replan path, not by
+        #: retroactively condemning a route the rover already completed.
+        self.planning_occupancy = None
         self.verified_qr: Optional[str] = None
         self._started_at: Optional[float] = None
         self._exploration_started_at: Optional[float] = None
@@ -158,7 +166,11 @@ class MissionOrchestrator:
             requested_qr=self.requested_qr,
             world_model=self.world_model,
             path_xy=self.path.xy if self.path is not None else None,
-            occupancy=self.world_model.occupancy,
+            occupancy=(
+                self.planning_occupancy
+                if self.planning_occupancy is not None
+                else self.world_model.occupancy
+            ),
             rover_start_xy=self.rover_start_xy,
             rover_final_xy=self.rover_final_xy,
             verified_qr=self.verified_qr,
@@ -345,6 +357,7 @@ class MissionOrchestrator:
             return self._fail(exc.reason, exc.detail or str(exc), now, outputs)
 
         self.path = path
+        self.planning_occupancy = grid
         outputs.path = path
         outputs.messages.append(
             f"[PLANNER] Path contains {len(path)} poses, {path.length_m:.2f} m, "
