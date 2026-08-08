@@ -1,5 +1,7 @@
 # Autonomous UAV + UGV QR Mission
 
+[![CI](https://github.com/mertey19/gazebo/actions/workflows/ci.yml/badge.svg)](https://github.com/mertey19/gazebo/actions/workflows/ci.yml)
+
 A scout drone maps an unknown arena, reads the QR code on each ground station,
 and hands the rover a collision-free route to the one station the operator
 asked for. The rover drives there and confirms with its own camera that it is
@@ -15,17 +17,34 @@ The mission is **not** told where `TARGET_2` is. It has to find it.
 
 ## 1. What runs where — read this first
 
+Every row is backed by a job in CI, so none of it is a claim about code that
+has merely been written.
+
 | Layer | Status |
 |---|---|
-| `mission_core` algorithms (QR/PnP, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed and tested.** 150 tests, including a full end-to-end mission per target. |
+| `mission_core` algorithms (QR/PnP, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed.** 152 tests, including a full offline mission per target. |
 | Offline mission harness (renders real QR textures through a real pinhole camera, ray-casts a lidar, integrates unicycle kinematics) | **Executed.** Drives the production pipeline with zero simulator. Reproduce with `python scripts/run_offline_mission.py`. |
-| Gazebo world, SDF models, `ros_gz` bridge, launch file, ROS 2 nodes | **Written, not executed on the development host.** 34 of the 150 tests are static cross-file consistency checks over exactly these files (§7); CI also contains a Gazebo end-to-end job (§11). |
+| ROS 2 Jazzy layer (interfaces, nodes, launch) | **Executed.** `colcon build` + `colcon test`, interfaces introspectable, every node entry point installed, launch file expands. |
+| **Gazebo Harmonic, full mission** | **Executed.** `gazebo-e2e` launches the whole stack headless and blocks on the real mission verdict. |
 
-The development host is Windows 11 with no WSL2 and no Docker, so ROS 2 and
-gz-sim cannot be installed on it. Every claim in this README about the
-`mission_core` pipeline is backed by a test run; nothing here claims the
-Gazebo layer has been run. See [§11 Known limitations](#11-known-limitations)
-for exactly what that leaves unverified and how to check it in one command.
+The last row is the one that matters, and it reports `MISSION_SUCCESS`:
+
+```
+[    0.2s] state=EXPLORING          target=TARGET_2
+[  192.9s] state=TARGET_FOUND       target=TARGET_2
+[  193.1s] state=PLANNING           target=TARGET_2
+[  193.2s] state=PATH_READY         target=TARGET_2
+[  193.4s] state=ROVER_NAVIGATING   target=TARGET_2
+[  218.8s] state=VERIFYING_TARGET   target=TARGET_2
+[  220.2s] state=MISSION_SUCCESS    target=TARGET_2 verified=TARGET_2
+
+path : 5 poses, 14.98 m       QR position error vs ground truth: ~2 cm
+```
+
+A green `unit-tests` says nothing about Gazebo, which is why the jobs are kept
+separate. The development host itself is Windows 11 with no WSL2 and no Docker,
+so ROS 2 and gz-sim cannot run on it — the Ubuntu evidence comes from CI, and
+[§11](#11-known-limitations) lists what CI still does not cover.
 
 The split exists precisely so that this distinction is possible: all mission
 *logic* lives in a ROS-free library, and the ROS nodes are thin adapters that
@@ -135,7 +154,7 @@ ros2_ws/src/
 │   │   ├── qr.py              decode + PnP marker pose
 │   │   ├── validation.py      the success criteria
 │   │   └── world_model.py     the digital twin
-│   └── test/                  150 tests, incl. sim_harness/offline_mission
+│   └── test/                  152 tests, incl. sim_harness/offline_mission
 ├── mission_interfaces/    9 msgs, 2 srvs, 1 action
 ├── mission_nodes/         5 rclpy nodes (thin adapters over mission_core)
 └── mission_bringup/       world, models, config, launch, rviz, frame checker
@@ -351,7 +370,7 @@ for PnP cannot drift apart.
 No ROS installation required — `mission_core` is deliberately ROS-free:
 
 ```bash
-python -m pytest                          # everything (150 tests, ~2 min)
+python -m pytest                          # everything (152 tests, ~2 min)
 python -m pytest -m "not integration"     # fast unit tests only (~3 s)
 python -m pytest -m integration -v        # full end-to-end mission runs
 ```
@@ -437,8 +456,46 @@ start** on an incoherent configuration. It catches, among others:
 
 ## 10. Things found and fixed while building this
 
-Recorded because each was a genuine defect caught by running the pipeline, not
-by reading it:
+Recorded because each was a genuine defect caught by *running* the pipeline,
+not by reading it. The second group came only from Gazebo — no amount of
+offline testing would have surfaced them.
+
+**Found by running in Gazebo (Ubuntu, ROS 2 Jazzy, OpenCV 4.6):**
+
+A. **All three stations displayed the same code.** Every MTL declared a
+   material called `qr_material` and every texture was `qr.png`; Ogre caches
+   both by *name*, so whichever loaded first was painted on all three. The
+   world model spotted one payload at three places and refused to act on it
+   with `DUPLICATE_QR` — the safety logic worked, which is why nothing worse
+   happened.
+B. **The offline harness rendered every texture mirrored.** Texture-right was
+   derived from the inward view direction, giving a left-handed basis. On a QR
+   code that moves the third finder pattern from bottom-left to bottom-right.
+   OpenCV ≥ 4.7 decodes mirrored codes and hid it; OpenCV 4.6 — what Ubuntu
+   24.04 and ROS Jazzy ship — decoded *nothing* in 349 frames.
+C. **The mission manager crashed on the failure path.** `level = ...error if
+   ... else ...info; level(msg)` — rclpy keys its logger cache by caller
+   location and rejects a severity change from one line, so the node died the
+   first time a mission failed.
+D. **Odometry was consumed as a map pose.** gz's `DiffDrive` dead-reckons from
+   zero at spawn, so a rover spawned at (-8, -8) reports (0, 0) while parked.
+   The rover drove a correctly planned, genuinely collision-free path to a
+   point one whole spawn offset from the station, reporting "Goal reached,
+   cross-track 0.00 m" throughout. Every vehicle pose now goes through TF.
+E. **Odometry yaw drift left the station just outside the camera.** The rover
+   arrived in the right place facing ~0.6 rad off. Fixed by looking around
+   (`VerificationSweep`) rather than by widening a tolerance.
+F. **TF lookups blocked and then discarded data.** Waiting on a transform
+   inside a single-threaded executor cannot work — the TF listener is a
+   callback on that same executor — and a sensor stamped 20 ms ahead of the
+   newest transform had its data dropped. One run integrated zero lidar sweeps
+   and produced a completely empty map.
+G. **The validator judged a path against a later map.** Runtime obstacle
+   mapping grows the grid while the rover drives, so a completed, verified
+   mission was failed with `PATH_INTERSECTS_OBSTACLE`. Paths are now checked
+   against the grid they were planned on.
+
+**Found by running the offline pipeline:**
 
 1. **PnP range biased by 1.56×.** `QRCodeDetector` returns the corners of the
    *code*, but the plate is what is 0.80 m wide — and `cv2.QRCodeEncoder`
@@ -464,29 +521,37 @@ by reading it:
 
 ## 11. Known limitations
 
-**Not executed on this host.** ROS 2 and gz-sim cannot be installed on the
-Windows 11 development machine (no WSL2, no Docker). The Gazebo world, the SDF
-models, the bridge configuration, the launch file and the five ROS nodes are
-written but have never been run. Concretely, these are the assumptions a first
-Ubuntu run should check:
+**What the Gazebo evidence does and does not cover.** The `gazebo-e2e` job runs
+the real mission to `MISSION_SUCCESS` on Ubuntu 24.04 with ROS 2 Jazzy and
+Gazebo Harmonic, so the frame tree, the sensor plumbing, the OBJ/MTL texturing,
+the plugin names and the whole state machine are exercised for real. The
+remaining caveats:
 
-1. **`map → */odom` static transforms.** The launch file assumes gz's
-   `OdometryPublisher` reports a *world* pose (so `map → drone/odom` is
-   identity) while `DiffDrive` dead-reckons from zero at spawn (so
-   `map → rover/odom` is the rover's spawn pose). If either changed, every
-   position shifts by a constant offset.
-   → `ros2 run mission_bringup check_frames.py` prints the residual and names
-   the transform to fix.
-2. **`<gz_frame_id>` support** on the sensors, and `<optical_frame_id>` on the
-   cameras. The QR node warns (and continues, using the configured frame) if an
-   image arrives with an unexpected `frame_id`.
-3. **OBJ/MTL texturing** of the station plates in ogre2. Explicit UV-mapped
-   quads were chosen over textured primitive boxes specifically to avoid
-   depending on how a renderer UV-maps a cube, but the material path itself is
-   untested. → `ros2 topic echo /perception/drone/qr_observations` after
-   takeoff; nothing arriving means the plates are not rendering.
+1. **CI flies at 0.5 m/s instead of the shipped 1.6.** GitHub runners have no
+   GPU, so Gazebo renders the drone camera through llvmpipe at roughly 0.7
+   frames per *simulated* second instead of 6. What governs target
+   confirmation is frames per metre flown, so the drone has to fly slower to
+   see each station the three times `min_observations` requires.
+   `config/mission_ci.yaml` changes that one value and nothing else — two
+   tests enforce that the overlay may not touch camera resolution, scan
+   altitude, perception thresholds, planner clearances or any verification
+   rule, so a green run still means the shipped mission works.
+   (Capping the simulator's real-time factor does *not* help: rendering is
+   wall-clock bound, so Gazebo drops more frames per simulated second —
+   measured 0.7 at RTF 0.15, 0.33 at 0.05.)
+2. **Only `TARGET_2` runs in CI.** The other two are covered offline. Widening
+   the job matrix costs ~8 minutes each.
+3. **One run is not a distribution.** The mission has a stochastic element in
+   how many frames catch each station; the `gazebo-e2e` job is not yet run
+   repeatedly enough to quote a success rate.
 4. **gz-sim plugin filenames** (`gz-sim-velocity-control-system`, etc.) are the
    Harmonic spellings and differ in Garden/Fortress.
+5. **No GUI run.** CI runs `headless:=true` (server only). The GUI path and the
+   RViz config are unexercised.
+
+`ros2 run mission_bringup check_frames.py` (before the mission starts) and
+`ros2 run mission_bringup check_pipeline.py` (any time) remain the two commands
+that localise a problem to a stage on a new machine.
 
 **Design limitations, deliberate for the MVP:**
 
