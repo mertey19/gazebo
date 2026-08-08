@@ -78,11 +78,52 @@ def strategies() -> List[Tuple[str, Callable[[np.ndarray], List[str]]]]:
                 results.append(payload)
         return results
 
+    def as_gray(image: np.ndarray) -> np.ndarray:
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+
+    def gray_multi(image: np.ndarray) -> List[str]:
+        ok, decoded, _, _ = detector.detectAndDecodeMulti(as_gray(image))
+        return [d for d in decoded if d] if ok else []
+
+    def otsu(image: np.ndarray) -> np.ndarray:
+        _, binary = cv2.threshold(
+            as_gray(image), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        return binary
+
+    def otsu_multi(image: np.ndarray) -> List[str]:
+        ok, decoded, _, _ = detector.detectAndDecodeMulti(otsu(image))
+        return [d for d in decoded if d] if ok else []
+
+    def otsu_upscaled(image: np.ndarray) -> List[str]:
+        big = cv2.resize(otsu(image), None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
+        ok, decoded, _, _ = detector.detectAndDecodeMulti(big)
+        return [d for d in decoded if d] if ok else []
+
+    def adaptive_multi(image: np.ndarray) -> List[str]:
+        binary = cv2.adaptiveThreshold(
+            as_gray(image), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
+        )
+        ok, decoded, _, _ = detector.detectAndDecodeMulti(binary)
+        return [d for d in decoded if d] if ok else []
+
+    def sharpened_multi(image: np.ndarray) -> List[str]:
+        gray = as_gray(image)
+        blurred = cv2.GaussianBlur(gray, (0, 0), 1.2)
+        sharp = cv2.addWeighted(gray, 1.8, blurred, -0.8, 0)
+        ok, decoded, _, _ = detector.detectAndDecodeMulti(sharp)
+        return [d for d in decoded if d] if ok else []
+
     candidates: List[Tuple[str, Callable[[np.ndarray], List[str]]]] = [
         ("detectAndDecodeMulti", plain_multi),
+        ("gray + multi", gray_multi),
         ("detectAndDecode", plain_single),
         ("upscale x2 + multi", upscaled(2)),
         ("upscale x3 + multi", upscaled(3)),
+        ("otsu + multi", otsu_multi),
+        ("otsu + upscale x2", otsu_upscaled),
+        ("adaptive + multi", adaptive_multi),
+        ("sharpen + multi", sharpened_multi),
         ("detectMulti + warped crop", detect_then_crop),
     ]
 
@@ -125,29 +166,37 @@ def main() -> int:
     altitudes = [config.drone.scan_altitude_m, 4.0, 3.0, 2.0]
     names = [name for name, _ in strategies()]
 
-    print(f"{'altitude':>9s} {'code px':>8s}  " + "  ".join(f"{n:>26s}" for n in names))
-    print("-" * (20 + 28 * len(names)))
+    # Keep the frames so a failing build's actual imagery can be inspected
+    # rather than guessed at.
+    dump_dir = Path("qr-diagnostic")
+    dump_dir.mkdir(exist_ok=True)
+
+    print(f"{'altitude':>9s} {'code px':>8s}  " + "  ".join(f"{n:>22s}" for n in names))
+    print("-" * (20 + 24 * len(names)))
     any_success_at_scan_altitude = False
     for altitude in altitudes:
         pose = camera_pose_from_body(
             (0.0, 0.0, altitude), 0.0, (0.10, 0.0, -0.08), R_BODY_TO_NADIR_OPTICAL
         )
         frame = world.render(pose, camera)
+        cv2.imwrite(str(dump_dir / f"frame_{altitude:.0f}m.png"), frame)
         code_px = camera.fx * config.code_size_m(PAYLOAD) / (altitude - 1.05)
         cells = []
         for name, run in strategies():
             try:
                 hits = run(frame)
             except cv2.error as exc:
-                cells.append(f"{'cv2.error':>26s}")
+                cells.append(f"{'cv2.error':>22s}")
                 continue
             mark = "OK" if PAYLOAD in hits else "-"
-            cells.append(f"{mark:>26s}")
+            cells.append(f"{mark:>22s}")
             if mark == "OK" and abs(altitude - config.drone.scan_altitude_m) < 1e-6:
                 any_success_at_scan_altitude = True
         print(f"{altitude:9.1f} {code_px:8.0f}  " + "  ".join(cells))
 
+    cv2.imwrite(str(dump_dir / "texture.png"), texture)
     print()
+    print(f"wrote diagnostic frames to {dump_dir}/")
     if any_success_at_scan_altitude:
         print("At least one strategy decodes at the configured scan altitude.")
         return 0
