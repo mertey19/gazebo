@@ -94,6 +94,15 @@ jobs:
           done
           # And the launch file must at least parse and expand.
           ros2 launch mission_bringup mission.launch.py --show-args
+      - name: Probe what this OpenCV build can decode
+        shell: bash
+        run: |
+          set -ex
+          source /opt/ros/jazzy/setup.bash
+          # The QR front end is the most OpenCV-version-sensitive part of the
+          # stack, and a build that cannot decode fails silently. Always run
+          # this before the tests so the logs say *why*.
+          python3 scripts/diagnose_qr_backend.py
       - name: colcon test
         shell: bash
         run: |
