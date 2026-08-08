@@ -8,3 +8,4 @@ out/
 
 # Machine-local Claude Code permission allowlist, not project content.
 .claude/settings.local.json
+qr-diagnostic/

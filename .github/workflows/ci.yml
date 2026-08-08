@@ -95,7 +95,6 @@ jobs:
           # And the launch file must at least parse and expand.
           ros2 launch mission_bringup mission.launch.py --show-args
       - name: Probe what this OpenCV build can decode
-        continue-on-error: true
         shell: bash
         run: |
           set -ex

@@ -51,9 +51,17 @@ class Quad:
 
     @property
     def normal(self) -> np.ndarray:
-        edge_a = self.corners[1] - self.corners[0]
-        edge_b = self.corners[3] - self.corners[0]
-        normal = np.cross(edge_a, edge_b)
+        """Outward normal, defined as ``right x up`` of the texture basis.
+
+        Corners are stored in texture order TL, TR, BR, BL, so ``right`` is
+        ``TR - TL`` and ``up`` is ``TL - BL``.  Taking ``TL - BL`` (rather than
+        ``BL - TL``) is what keeps this normal consistent with an unmirrored
+        texture: the two must agree, or fixing one flips the other and the face
+        gets back-face culled instead of rendered.
+        """
+        right = self.corners[1] - self.corners[0]
+        up = self.corners[0] - self.corners[3]
+        normal = np.cross(right, up)
         length = float(np.linalg.norm(normal))
         return normal / length if length > 1e-12 else normal
 
@@ -77,8 +85,13 @@ class OrientedBox:
         centre = np.asarray(self.centre, dtype=float)
 
         # (outward normal, texture-up) pairs in the box's local frame.  Texture
-        # right is derived as up x normal_view so every face reads correctly
-        # from outside, which is what the decoder needs.
+        # right is derived as `up x normal`, which is the condition
+        # `right x up == normal` - i.e. a right-handed basis with the *outward*
+        # normal.  Using the inward view direction instead flips the handedness
+        # and renders every texture mirrored, which for a QR code moves the
+        # third finder pattern from bottom-left to bottom-right.  OpenCV >= 4.7
+        # happens to decode mirrored codes, so that bug stays invisible until
+        # the stack meets an older build (Ubuntu 24.04 ships OpenCV 4.6).
         specs = [
             (np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), half[0], (half[1], half[2])),
             (np.array([-1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]), half[0], (half[1], half[2])),
@@ -89,8 +102,7 @@ class OrientedBox:
         ]
         quads: List[Quad] = []
         for normal, up, offset, extents in specs:
-            view = -normal  # direction the observer looks, i.e. into the face
-            right = np.cross(up, view)
+            right = np.cross(up, normal)
             right_norm = float(np.linalg.norm(right))
             if right_norm < 1e-9:  # pragma: no cover - guarded by the spec table
                 continue

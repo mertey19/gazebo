@@ -198,6 +198,88 @@ def test_altitude_budget_matches_configuration(drone_camera, config) -> None:
         )
 
 
+def test_rendered_faces_are_not_mirrored() -> None:
+    """Every textured face must use a right-handed basis with its normal.
+
+    Regression: the harness derived texture-right from the inward view
+    direction, which mirrors every face.  A mirrored QR code has its third
+    finder pattern in the bottom-*right* corner and is unreadable by OpenCV
+    4.6 (what Ubuntu 24.04 and ROS Jazzy ship), while OpenCV >= 4.7 decodes it
+    happily - so the defect was invisible locally and fatal on the target.
+
+    Asserted geometrically rather than by decoding, because a decoder that
+    tolerates mirroring cannot detect mirroring.
+    """
+    from sim_harness import OrientedBox
+
+    box = OrientedBox(np.zeros(3), np.array([1.0, 1.0, 1.0]))
+    for quad in box.faces(None, (0, 0, 0)):
+        right = quad.corners[1] - quad.corners[0]
+        up = quad.corners[0] - quad.corners[3]
+        right /= np.linalg.norm(right)
+        up /= np.linalg.norm(up)
+        assert np.allclose(np.cross(right, up), quad.normal, atol=1e-9), (
+            f"face with normal {quad.normal} is mirrored: "
+            f"right x up = {np.cross(right, up)}"
+        )
+
+
+def test_rendered_code_has_canonical_finder_layout(drone_camera, config) -> None:
+    """A rendered QR must have finder patterns at TL, TR and BL - not BR.
+
+    Rectifies the plate straight out of the rendered frame using the *known*
+    projected geometry (no decoder involved) and then checks where the three
+    7x7 finder patterns actually are.
+    """
+    world = SyntheticWorld([Station("TARGET_2", (0.0, 0.0))], [])
+    pose = camera_pose_from_body((0.0, 0.0, 3.0), 0.0, (0.0, 0.0, 0.0), R_BODY_TO_NADIR_OPTICAL)
+    frame = cv2.cvtColor(world.render(pose, drone_camera), cv2.COLOR_BGR2GRAY)
+
+    # Take the top face's corners straight from the harness - they are already
+    # in texture order TL, TR, BR, BL - so this test checks what is actually
+    # rendered rather than re-stating the convention it is meant to police.
+    station = world.stations[0]
+    top_face = max(station.cube.faces(None, (0, 0, 0)), key=lambda q: q.normal[2])
+    assert top_face.normal[2] > 0.99, "expected an upward-facing top plate"
+    pixels = drone_camera.project(pose.inverse().apply(top_face.corners)).astype(np.float32)
+
+    size = 210  # 21 modules x 10 px, plus the quiet zone handled below
+    modules = qr_module_count("TARGET_2")
+    quiet = config.mission.qr_quiet_zone_modules
+    total = modules + 2 * quiet
+    plate_px = int(size * total / modules)
+    rectified = cv2.warpPerspective(
+        frame,
+        cv2.getPerspectiveTransform(
+            pixels,
+            np.array(
+                [[0, 0], [plate_px - 1, 0], [plate_px - 1, plate_px - 1], [0, plate_px - 1]],
+                dtype=np.float32,
+            ),
+        ),
+        (plate_px, plate_px),
+    )
+    module_px = plate_px / total
+
+    def is_finder(corner: str) -> bool:
+        """A finder pattern is a dark 7x7 block with a light 5x5 ring inside."""
+        row = quiet if corner[0] == "t" else total - quiet - 7
+        col = quiet if corner[1] == "l" else total - quiet - 7
+        def module(r: int, c: int) -> bool:
+            y = int((row + r + 0.5) * module_px)
+            x = int((col + c + 0.5) * module_px)
+            return rectified[y, x] < 128  # dark
+        outer = all(module(0, c) for c in range(7)) and all(module(6, c) for c in range(7))
+        ring = not module(1, 1) and not module(1, 5) and not module(5, 1)
+        core = module(3, 3)
+        return outer and ring and core
+
+    assert is_finder("tl"), "no finder pattern at the top-left"
+    assert is_finder("tr"), "no finder pattern at the top-right"
+    assert is_finder("bl"), "no finder pattern at the bottom-left - the code is MIRRORED"
+    assert not is_finder("br"), "a finder pattern at the bottom-right means a mirrored code"
+
+
 def test_transform_round_trip_is_exact() -> None:
     """A pose composed and inverted must return the original point."""
     pose = camera_pose_from_body((3.0, -2.0, 5.0), 0.9, DRONE_MOUNT, R_BODY_TO_NADIR_OPTICAL)
