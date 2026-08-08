@@ -56,7 +56,7 @@ jobs:
       - name: Install ROS dependencies
         shell: bash
         run: |
-          set -eux
+          set -ex
           apt-get update
           apt-get install -y --no-install-recommends \
             python3-colcon-common-extensions python3-opencv python3-numpy python3-yaml \
@@ -65,7 +65,7 @@ jobs:
       - name: Show versions
         shell: bash
         run: |
-          set -eux
+          set -ex
           source /opt/ros/jazzy/setup.bash
           echo "ROS_DISTRO=$ROS_DISTRO"
           gz sim --versions || true
@@ -73,14 +73,14 @@ jobs:
       - name: colcon build
         shell: bash
         run: |
-          set -eux
+          set -ex
           source /opt/ros/jazzy/setup.bash
           cd ros2_ws
           colcon build --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=Release
       - name: Verify the interfaces and executables actually installed
         shell: bash
         run: |
-          set -eux
+          set -ex
           source /opt/ros/jazzy/setup.bash
           source ros2_ws/install/setup.bash
           # Generated interfaces must be introspectable, not just compiled.
@@ -97,7 +97,7 @@ jobs:
       - name: colcon test
         shell: bash
         run: |
-          set -eux
+          set -ex
           source /opt/ros/jazzy/setup.bash
           cd ros2_ws
           colcon test --packages-select mission_core --event-handlers console_direct+
@@ -129,7 +129,7 @@ jobs:
       - name: Install ROS and rendering dependencies
         shell: bash
         run: |
-          set -eux
+          set -ex
           apt-get update
           apt-get install -y --no-install-recommends \
             python3-colcon-common-extensions python3-opencv python3-numpy python3-yaml \
@@ -140,19 +140,19 @@ jobs:
       - name: Report the rendering backend
         shell: bash
         run: |
-          set -eux
+          set -ex
           xvfb-run -a glxinfo -B || echo "glxinfo unavailable"
       - name: colcon build
         shell: bash
         run: |
-          set -eux
+          set -ex
           source /opt/ros/jazzy/setup.bash
           cd ros2_ws
           colcon build --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=Release
       - name: Launch the mission and check the live pipeline
         shell: bash
         run: |
-          set -eux
+          set -ex
           source /opt/ros/jazzy/setup.bash
           source ros2_ws/install/setup.bash
           mkdir -p logs
@@ -177,7 +177,7 @@ jobs:
       - name: Wait for the mission verdict
         shell: bash
         run: |
-          set -eux
+          set -ex
           source /opt/ros/jazzy/setup.bash
           source ros2_ws/install/setup.bash
           ros2 run mission_bringup await_mission.py --timeout 2400 | tee logs/mission.txt
