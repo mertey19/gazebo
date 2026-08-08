@@ -73,6 +73,7 @@ class MissionManagerNode(Node):
         self.declare_parameter("rover_odometry_topic", "/rover/odometry")
         self.declare_parameter("drone_start_service", "/drone_explorer/start")
         self.declare_parameter("rover_stop_service", "/rover_path_follower/stop")
+        self.declare_parameter("rover_search_service", "/rover_path_follower/search")
 
         self.map_frame = self.config.frames.map_frame
         # Local mirror of the digital twin. The world_model node is the single
@@ -143,6 +144,9 @@ class MissionManagerNode(Node):
         )
         self.rover_stop_client = self.create_client(
             Trigger, str(self.get_parameter("rover_stop_service").value)
+        )
+        self.rover_search_client = self.create_client(
+            Trigger, str(self.get_parameter("rover_search_service").value)
         )
 
         self.create_service(PlanPath, "/mission/plan_path", self._on_plan_path)
@@ -363,6 +367,8 @@ class MissionManagerNode(Node):
                 f"[MISSION] published {len(msg.poses)} poses on "
                 f"{self.path_pub.topic_name} in frame {self.map_frame}"
             )
+        elif outputs.command is MissionCommand.START_VERIFICATION:
+            self._call_trigger(self.rover_search_client, "rover verification sweep")
         elif outputs.command is MissionCommand.STOP_ROVER:
             self._stop_rover()
 

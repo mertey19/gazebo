@@ -133,3 +133,8 @@ verification:
   # A code further away than this is a different station seen in the
   # background, not the one the rover parked in front of.
   max_range_m: 4.0
+  # On arrival the rover sweeps its heading looking for the code. Wheel
+  # odometry drifts in yaw, so "facing the station" is an estimate; a station
+  # 0.4 rad off-axis already falls outside the 1.2 rad camera.
+  search_sweep_rad: 1.05
+  search_yaw_rate_rad_s: 0.4

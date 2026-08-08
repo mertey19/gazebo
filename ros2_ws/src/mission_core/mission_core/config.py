@@ -165,6 +165,12 @@ class VerificationConfig:
     #: A code further away than this is some other station seen in the
     #: background, not the one the rover is parked in front of.
     max_range_m: float = 4.0
+    #: On arrival the rover sweeps its heading to look for the code. Wheel
+    #: odometry drifts in yaw, so "I am facing the station" is an estimate,
+    #: not a fact - and a station 0.4 rad off-axis falls outside a 1.2 rad
+    #: camera. Sweeping costs seconds and removes the whole failure mode.
+    search_sweep_rad: float = 1.05
+    search_yaw_rate_rad_s: float = 0.4
 
 
 @dataclass(frozen=True)

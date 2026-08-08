@@ -23,7 +23,11 @@ from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Trigger
 
 from mission_core.errors import FailureReason
-from mission_core.path_following import FollowerState, PurePursuitController
+from mission_core.path_following import (
+    FollowerState,
+    PurePursuitController,
+    VerificationSweep,
+)
 
 from mission_interfaces.msg import TrackingStatus as TrackingStatusMsg
 
@@ -77,6 +81,12 @@ class RoverPathFollowerNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        self._sweep = VerificationSweep(
+            self.config.verification.search_sweep_rad,
+            self.config.verification.search_yaw_rate_rad_s,
+        )
+        self._searching = False
+
         self._pose: Optional[np.ndarray] = None
         self._pose_failures = 0
         self._last_step_s: Optional[float] = None
@@ -105,6 +115,7 @@ class RoverPathFollowerNode(Node):
                 LaserScan, str(self.get_parameter("scan_topic").value), self._on_scan, SENSOR_QOS
             )
         self.create_service(Trigger, "~/stop", self._on_stop)
+        self.create_service(Trigger, "~/search", self._on_search)
 
         self.create_timer(1.0 / max(rover.control_rate_hz, 1e-3), self._control_step)
         self.get_logger().info(
@@ -171,8 +182,21 @@ class RoverPathFollowerNode(Node):
             )
         self._safety_blocked = blocked
 
+    def _on_search(self, _request, response):
+        """Sweep the heading while the QR detector looks for the code."""
+        self._sweep.reset()
+        self._searching = True
+        response.success = True
+        response.message = (
+            f"sweeping +/-{self.config.verification.search_sweep_rad:.2f} rad at "
+            f"{self.config.verification.search_yaw_rate_rad_s:.2f} rad/s"
+        )
+        self.get_logger().info(f"[ROVER] verification sweep started: {response.message}")
+        return response
+
     def _on_stop(self, _request, response):
         self.controller.reset()
+        self._searching = False
         self.cmd_pub.publish(Twist())
         response.success = True
         response.message = "path cleared, rover stopped"
@@ -181,6 +205,9 @@ class RoverPathFollowerNode(Node):
 
     # -- control -----------------------------------------------------------
     def _control_step(self) -> None:
+        if self._searching:
+            self._sweep_step()
+            return
         if not self.controller.has_path:
             return
         if self._pose is None:
@@ -218,6 +245,23 @@ class RoverPathFollowerNode(Node):
                 )
             else:
                 self.get_logger().error(f"[ROVER] tracking FAILED: {status.detail}")
+
+    def _sweep_step(self) -> None:
+        """Rotate in place looking for the code; stop when the sweep is done."""
+        dt = 1.0 / max(self.config.rover.control_rate_hz, 1e-3)
+        yaw_rate = self._sweep.step(dt)
+        twist = Twist()
+        twist.angular.z = float(
+            np.clip(yaw_rate, -self.config.rover.max_angular_velocity,
+                    self.config.rover.max_angular_velocity)
+        )
+        self.cmd_pub.publish(twist)
+        if self._sweep.finished:
+            self._searching = False
+            self.cmd_pub.publish(Twist())
+            self.get_logger().info(
+                "[ROVER] verification sweep complete; holding position"
+            )
 
     def _publish_status(self, status, linear: float, angular: float) -> None:
         msg = TrackingStatusMsg()

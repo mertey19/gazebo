@@ -180,3 +180,77 @@ def test_progress_index_only_moves_forward() -> None:
         indices.append(status.progress_index)
     assert indices == sorted(indices), "progress index went backwards"
     assert status.state is FollowerState.GOAL_REACHED
+
+
+# ---------------------------------------------------------------------------
+# Verification sweep
+# ---------------------------------------------------------------------------
+
+def test_sweep_covers_the_full_amplitude_both_ways() -> None:
+    """The sweep must scan [-A, +A] and end back where it started."""
+    from mission_core.path_following import VerificationSweep
+
+    sweep = VerificationSweep(sweep_rad=1.0, yaw_rate_rad_s=0.5)
+    dt = 0.05
+    yaw = 0.0
+    extremes = [0.0, 0.0]
+    for _ in range(10000):
+        if sweep.finished:
+            break
+        # step() returns a yaw *rate*, so integrate it.
+        yaw += sweep.step(dt) * dt
+        extremes[0] = min(extremes[0], yaw)
+        extremes[1] = max(extremes[1], yaw)
+
+    assert sweep.finished
+    assert extremes[0] == pytest.approx(-1.0, abs=1e-6)
+    assert extremes[1] == pytest.approx(1.0, abs=1e-6)
+    assert yaw == pytest.approx(0.0, abs=1e-6), "the sweep must return to its start heading"
+
+
+def test_sweep_respects_its_rate_and_never_overshoots_a_leg() -> None:
+    from mission_core.path_following import VerificationSweep
+
+    sweep = VerificationSweep(sweep_rad=0.6, yaw_rate_rad_s=0.4)
+    yaw = 0.0
+    while not sweep.finished:
+        rate = sweep.step(0.1)
+        assert abs(rate) <= 0.4 + 1e-9
+        yaw += rate * 0.1
+        assert -0.6 - 1e-9 <= yaw <= 0.6 + 1e-9, f"swept past the amplitude to {yaw}"
+
+
+def test_finished_sweep_commands_nothing() -> None:
+    from mission_core.path_following import VerificationSweep
+
+    sweep = VerificationSweep(sweep_rad=0.2, yaw_rate_rad_s=1.0)
+    while not sweep.finished:
+        sweep.step(0.05)
+    assert sweep.step(0.05) == 0.0
+    assert sweep.progress == pytest.approx(1.0)
+
+    sweep.reset()
+    assert not sweep.finished
+    assert sweep.step(0.05) != 0.0
+
+
+def test_sweep_rejects_nonsense_parameters() -> None:
+    from mission_core.path_following import VerificationSweep
+
+    with pytest.raises(ValueError):
+        VerificationSweep(sweep_rad=0.0, yaw_rate_rad_s=0.4)
+    with pytest.raises(ValueError):
+        VerificationSweep(sweep_rad=1.0, yaw_rate_rad_s=-0.1)
+
+
+def test_sweep_amplitude_covers_plausible_odometry_yaw_drift(config) -> None:
+    """The sweep must be wide enough to recover a station just out of frame.
+
+    A station at the edge of the camera is at half the horizontal FOV; the
+    sweep has to reach at least that far or it cannot fix the case it exists for.
+    """
+    half_fov = config.rover.camera.horizontal_fov_rad / 2.0
+    assert config.verification.search_sweep_rad > half_fov, (
+        f"sweep {config.verification.search_sweep_rad:.2f} rad does not exceed the "
+        f"camera half-FOV {half_fov:.2f} rad"
+    )

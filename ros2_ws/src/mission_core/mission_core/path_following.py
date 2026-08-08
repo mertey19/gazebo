@@ -320,6 +320,64 @@ class PurePursuitController:
         )
 
 
+class VerificationSweep:
+    """Rotate in place looking for a code that should already be in view.
+
+    The rover arrives facing where its odometry *believes* the station is.
+    Wheel odometry accumulates yaw error, so that belief can be off by more
+    than the camera's half field of view, leaving the station just outside the
+    frame - which is indistinguishable, from the logs, from "there is no code
+    here".
+
+    A bounded alternating sweep (right, then left through twice the amplitude,
+    then back) resolves it in a few seconds and costs nothing when the heading
+    was right all along, because verification succeeds on the first frames and
+    the sweep is cancelled.
+    """
+
+    def __init__(self, sweep_rad: float, yaw_rate_rad_s: float) -> None:
+        if sweep_rad <= 0.0 or yaw_rate_rad_s <= 0.0:
+            raise ValueError("sweep amplitude and rate must be positive")
+        self.sweep_rad = float(sweep_rad)
+        self.yaw_rate_rad_s = float(yaw_rate_rad_s)
+        # Right by A, left by 2A, right by A: ends where it started, having
+        # covered [-A, +A] continuously.
+        self._legs = (-self.sweep_rad, 2.0 * self.sweep_rad, -self.sweep_rad)
+        self._leg = 0
+        self._travelled = 0.0
+
+    def reset(self) -> None:
+        self._leg = 0
+        self._travelled = 0.0
+
+    @property
+    def finished(self) -> bool:
+        return self._leg >= len(self._legs)
+
+    @property
+    def progress(self) -> float:
+        """Fraction of the total sweep completed, in ``[0, 1]``."""
+        total = sum(abs(leg) for leg in self._legs)
+        done = sum(abs(leg) for leg in self._legs[: self._leg]) + abs(self._travelled)
+        return float(np.clip(done / total, 0.0, 1.0))
+
+    def step(self, dt: float) -> float:
+        """Yaw rate for this tick; 0.0 once the sweep is complete."""
+        if self.finished or dt <= 0.0:
+            return 0.0
+        target = self._legs[self._leg]
+        direction = 1.0 if target > 0.0 else -1.0
+        remaining = abs(target) - abs(self._travelled)
+        if remaining <= 0.0:
+            self._leg += 1
+            self._travelled = 0.0
+            return self.step(dt)
+        # Never overshoot the leg: the last tick is scaled to what is left.
+        rate = direction * min(self.yaw_rate_rad_s, remaining / dt)
+        self._travelled += rate * dt
+        return float(rate)
+
+
 class DifferentialDriveModel:
     """Unicycle kinematics used by the offline harness and controller tests.
 

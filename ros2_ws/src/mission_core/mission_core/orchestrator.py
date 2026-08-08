@@ -26,17 +26,19 @@ from .world_model import TargetStatus, WorldModel
 class MissionCommand(str, Enum):
     """Side effect the manager should perform after an :meth:`update` call.
 
-    Only side effects that something actually performs belong here.  Entering
-    EXPLORING and VERIFYING_TARGET are real events, but neither needs a command:
-    the explorer's ``start()`` (triggered by ``START_TAKEOFF``) climbs *and*
-    scans, and verification needs no trigger because the rover's QR detector
-    runs continuously while the manager gates on mission state.  Both are
-    observable on ``/mission/status`` instead.
+    Only side effects that something actually performs belong here. Entering
+    EXPLORING needs no command, for instance: the explorer's ``start()``
+    (triggered by ``START_TAKEOFF``) climbs *and* scans, and the transition is
+    observable on ``/mission/status``.
     """
 
     NONE = "NONE"
     START_TAKEOFF = "START_TAKEOFF"
     PUBLISH_PATH = "PUBLISH_PATH"
+    #: Ask the rover to sweep its heading while it looks for the code. Wheel
+    #: odometry drifts in yaw, so arriving "facing the station" can still leave
+    #: it outside the camera - the rover has to look around rather than assume.
+    START_VERIFICATION = "START_VERIFICATION"
     STOP_ROVER = "STOP_ROVER"
 
 
@@ -394,6 +396,7 @@ class MissionOrchestrator:
         outputs.messages.append("[ROVER] Goal reached")
         self._advance(MissionState.VERIFYING_TARGET, now, outputs)
         self._verification_started_at = now
+        outputs.command = MissionCommand.START_VERIFICATION
         return outputs
 
     def _on_verifying_target(
