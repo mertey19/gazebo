@@ -74,6 +74,7 @@ class MissionManagerNode(Node):
         self.declare_parameter("drone_start_service", "/drone_explorer/start")
         self.declare_parameter("rover_stop_service", "/rover_path_follower/stop")
         self.declare_parameter("rover_search_service", "/rover_path_follower/search")
+        self.declare_parameter("drone_follow_service", "/drone_explorer/follow")
 
         self.map_frame = self.config.frames.map_frame
         # Local mirror of the digital twin. The world_model node is the single
@@ -147,6 +148,9 @@ class MissionManagerNode(Node):
         )
         self.rover_search_client = self.create_client(
             Trigger, str(self.get_parameter("rover_search_service").value)
+        )
+        self.drone_follow_client = self.create_client(
+            Trigger, str(self.get_parameter("drone_follow_service").value)
         )
 
         self.create_service(PlanPath, "/mission/plan_path", self._on_plan_path)
@@ -367,6 +371,8 @@ class MissionManagerNode(Node):
                 f"[MISSION] published {len(msg.poses)} poses on "
                 f"{self.path_pub.topic_name} in frame {self.map_frame}"
             )
+        elif outputs.command is MissionCommand.START_ESCORT:
+            self._call_trigger(self.drone_follow_client, "drone escort")
         elif outputs.command is MissionCommand.START_VERIFICATION:
             # Each attempt must earn its own consecutive-read quorum; stale
             # reads from an earlier sweep cannot complete a later attempt.

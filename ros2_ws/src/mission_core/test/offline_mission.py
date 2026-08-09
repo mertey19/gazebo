@@ -23,6 +23,7 @@ from mission_core.camera import PinholeCamera
 from mission_core.config import MissionConfig
 from mission_core.errors import PerceptionError
 from mission_core.exploration import (
+    EscortController,
     FlightPhase,
     KinematicDrone,
     WaypointFlightController,
@@ -175,6 +176,13 @@ class OfflineMissionRunner:
             cross_track_grace_s=config.rover.cross_track_grace_s,
             approach_slowdown_m=config.rover.approach_slowdown_m,
         )
+        self.escort = EscortController(
+            altitude_m=config.drone.scan_altitude_m,
+            depression_rad=config.drone.camera_depression_rad,
+            speed_mps=config.drone.follow_speed_mps,
+            distance_scale=config.drone.follow_distance_scale,
+        )
+        self._escorting = False
         self.orchestrator = MissionOrchestrator(
             config, self.world_model, requested_qr=self.requested_qr
         )
@@ -310,11 +318,19 @@ class OfflineMissionRunner:
             ):
                 if self.flight.phase is FlightPhase.GROUNDED:
                     self.flight.start()
-                command = self.flight.compute(self.drone.position, self.drone.yaw)
+                if self._escorting:
+                    command = self.escort.compute(
+                        self.drone.position, self.drone.yaw, self.rover.pose
+                    )
+                else:
+                    command = self.flight.compute(self.drone.position, self.drone.yaw)
                 self.drone.step(command.velocity_map, command.yaw_rate, self.dt)
                 self.trace.drone_track.append(self.drone.position.copy())
 
-                if self.flight.phase in (FlightPhase.SCANNING, FlightPhase.COMPLETE):
+                if self._escorting or self.flight.phase in (
+                    FlightPhase.SCANNING,
+                    FlightPhase.COMPLETE,
+                ):
                     if now - self._last_perception_t >= self._perception_period:
                         self._last_perception_t = now
                         self._observe_with_drone(now)
@@ -364,6 +380,9 @@ class OfflineMissionRunner:
             )
             for message in outputs.messages:
                 self._log(message)
+
+            if outputs.command is MissionCommand.START_ESCORT:
+                self._escorting = True
 
             if outputs.command is MissionCommand.PREPARE_REPLAN:
                 # Mirrors mission_manager_node: a new leg starts from a clean

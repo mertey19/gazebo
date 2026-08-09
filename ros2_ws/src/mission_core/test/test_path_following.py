@@ -275,3 +275,85 @@ def test_sweep_amplitude_covers_plausible_odometry_yaw_drift(config) -> None:
         f"sweep {config.verification.search_sweep_rad:.2f} rad does not exceed the "
         f"camera half-FOV {half_fov:.2f} rad"
     )
+
+
+# ---------------------------------------------------------------------------
+# Drone escort
+# ---------------------------------------------------------------------------
+
+def test_escort_station_is_where_the_camera_points(config) -> None:
+    """The standoff must equal the distance the depressed camera looks ahead.
+
+    Any other offset puts the rover at the edge of the frame or outside it,
+    which defeats the point of escorting it at all.
+    """
+    from mission_core.exploration import EscortController
+
+    escort = EscortController(
+        altitude_m=config.drone.scan_altitude_m,
+        depression_rad=config.drone.camera_depression_rad,
+        speed_mps=config.drone.follow_speed_mps,
+    )
+    height = config.drone.scan_altitude_m - escort.rover_height_m
+    assert escort.standoff_m == pytest.approx(
+        height / math.tan(config.drone.camera_depression_rad), rel=1e-9
+    )
+
+    # Behind the rover, whichever way it is pointing.
+    for yaw in (0.0, math.pi / 2, -2.0, math.pi):
+        station = escort.station_for((3.0, -2.0, yaw))
+        offset = station[:2] - np.array([3.0, -2.0])
+        assert float(np.linalg.norm(offset)) == pytest.approx(escort.standoff_m, rel=1e-9)
+        bearing = math.atan2(-offset[1], -offset[0])
+        assert abs(math.atan2(math.sin(bearing - yaw), math.cos(bearing - yaw))) < 1e-9
+        assert station[2] == pytest.approx(config.drone.scan_altitude_m)
+
+
+def test_escort_converges_onto_a_moving_rover() -> None:
+    """Closed loop: the drone must catch a rover and then hold station."""
+    from mission_core.exploration import EscortController, KinematicDrone
+
+    escort = EscortController(
+        altitude_m=4.0, depression_rad=math.radians(30), speed_mps=2.2
+    )
+    drone = KinematicDrone((-14.0, 5.0, 4.0), yaw=0.0)
+    rover = np.array([0.0, 0.0, 0.0])
+    dt = 0.05
+
+    for step in range(4000):
+        # Rover drives forward at its cruise speed, turning gently.
+        rover[2] += 0.05 * dt
+        rover[0] += 0.8 * math.cos(rover[2]) * dt
+        rover[1] += 0.8 * math.sin(rover[2]) * dt
+        command = escort.compute(drone.position, drone.yaw, rover)
+        drone.step(command.velocity_map, command.yaw_rate, dt)
+
+    station = escort.station_for(rover)
+    error = float(np.linalg.norm(drone.position[:2] - station[:2]))
+    assert error < 1.0, f"drone settled {error:.2f} m from its station"
+    assert abs(drone.position[2] - 4.0) < 0.2
+
+    # And it must be looking at the rover, not merely near it.
+    bearing = math.atan2(rover[1] - drone.position[1], rover[0] - drone.position[0])
+    heading_error = abs(math.atan2(math.sin(bearing - drone.yaw), math.cos(bearing - drone.yaw)))
+    assert heading_error < 0.25, f"drone yaw is {heading_error:.2f} rad off the rover"
+
+
+def test_escort_never_exceeds_its_speed_limit() -> None:
+    from mission_core.exploration import EscortController
+
+    escort = EscortController(
+        altitude_m=4.0, depression_rad=math.radians(30), speed_mps=1.5
+    )
+    for distance in (0.1, 1.0, 5.0, 50.0):
+        command = escort.compute((-distance, 0.0, 4.0), 0.0, (0.0, 0.0, 0.0))
+        assert float(np.linalg.norm(command.velocity_map[:2])) <= 1.5 + 1e-9
+
+
+def test_escort_rejects_impossible_geometry() -> None:
+    from mission_core.exploration import EscortController
+
+    with pytest.raises(ValueError, match="above the rover"):
+        EscortController(altitude_m=0.2, depression_rad=0.5, speed_mps=1.0)
+    with pytest.raises(ValueError, match="depression"):
+        EscortController(altitude_m=4.0, depression_rad=0.0, speed_mps=1.0)

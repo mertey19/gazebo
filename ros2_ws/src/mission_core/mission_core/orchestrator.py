@@ -43,6 +43,9 @@ class MissionCommand(str, Enum):
     #: newly planned path. Kept distinct from STOP_ROVER so adapters can reset
     #: the path-publication handshake during recovery.
     PREPARE_REPLAN = "PREPARE_REPLAN"
+    #: Stop flying the coverage pattern and hold station on the rover, so the
+    #: drone keeps eyes on it for the whole drive.
+    START_ESCORT = "START_ESCORT"
     STOP_ROVER = "STOP_ROVER"
 
 
@@ -133,6 +136,7 @@ class MissionOrchestrator:
         self.tour: List[str] = []
         self._leg = 0
         self._returning_home = False
+        self._escorting = False
         #: Where the rover began; also where it drives back to.
         self.home_xy: Optional[np.ndarray] = None
         #: Payload verified at each station the rover actually reached.
@@ -471,6 +475,12 @@ class MissionOrchestrator:
             )
             self._advance(MissionState.ROVER_NAVIGATING, now, outputs)
         self._navigation_started_at = now
+        if not self._escorting:
+            self._escorting = True
+            outputs.messages.append("[DRONE] Escorting the rover")
+        # Re-issued every leg: the request is idempotent and a drone that
+        # missed the first one would otherwise sit over the last waypoint.
+        outputs.command = MissionCommand.START_ESCORT
         return outputs
 
     def _on_rover_navigating(

@@ -19,6 +19,7 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 
 from mission_core.exploration import (
+    EscortController,
     FlightPhase,
     WaypointFlightController,
     lawnmower_waypoints,
@@ -31,6 +32,7 @@ from .common import (
     SENSOR_QOS,
     declare_mission_config,
     make_header,
+    odometry_pose_in_frame,
     odometry_position_in_frame,
 )
 
@@ -45,6 +47,7 @@ class DroneExplorerNode(Node):
         self.declare_parameter("odometry_topic", "/drone/odometry")
         self.declare_parameter("cmd_vel_topic", "/drone/cmd_vel")
         self.declare_parameter("status_topic", "/drone/exploration_status")
+        self.declare_parameter("rover_odometry_topic", "/rover/odometry")
         # Autostart is the default so the single launch command produces a
         # complete mission; the service exists for manual/staged runs.
         self.declare_parameter("auto_start", True)
@@ -70,6 +73,15 @@ class DroneExplorerNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        self.escort = EscortController(
+            altitude_m=self.config.drone.scan_altitude_m,
+            depression_rad=self.config.drone.camera_depression_rad,
+            speed_mps=self.config.drone.follow_speed_mps,
+            distance_scale=self.config.drone.follow_distance_scale,
+        )
+        self._escorting = False
+        self._rover_pose: Optional[np.ndarray] = None
+
         self._position: Optional[np.ndarray] = None
         self._yaw = 0.0
         self._last_waypoint_logged = -1
@@ -84,7 +96,14 @@ class DroneExplorerNode(Node):
         self.create_subscription(
             Odometry, str(self.get_parameter("odometry_topic").value), self._on_odometry, SENSOR_QOS
         )
+        self.create_subscription(
+            Odometry,
+            str(self.get_parameter("rover_odometry_topic").value),
+            self._on_rover_odometry,
+            SENSOR_QOS,
+        )
         self.create_service(Trigger, "~/start", self._on_start)
+        self.create_service(Trigger, "~/follow", self._on_follow)
         self.create_service(Trigger, "~/hold", self._on_hold)
         self.create_timer(1.0 / max(self.config.drone.control_rate_hz, 1e-3), self._control_step)
 
@@ -127,6 +146,28 @@ class DroneExplorerNode(Node):
         self.get_logger().info("[DRONE] exploration start requested")
         return response
 
+    def _on_rover_odometry(self, msg: Odometry) -> None:
+        pose, error = odometry_pose_in_frame(
+            self.tf_buffer, msg, self.config.frames.map_frame
+        )
+        if pose is None:
+            self.get_logger().warn(
+                f"[DRONE] cannot express rover odometry in the map frame: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+        self._rover_pose = pose
+
+    def _on_follow(self, _request, response):
+        """Stop the coverage pattern and hold station on the rover."""
+        self._escorting = True
+        response.success = True
+        response.message = (
+            f"escorting the rover from {self.escort.standoff_m:.2f} m behind it"
+        )
+        self.get_logger().info(f"[DRONE] {response.message}")
+        return response
+
     def _on_hold(self, _request, response):
         self.controller._phase = FlightPhase.COMPLETE  # station-keep at altitude
         response.success = True
@@ -143,7 +184,17 @@ class DroneExplorerNode(Node):
             self.cmd_pub.publish(Twist())
             return
 
-        command = self.controller.compute(self._position, self._yaw)
+        if self._escorting:
+            if self._rover_pose is None:
+                self.get_logger().warn(
+                    "[DRONE] escorting but the rover pose is unknown; holding",
+                    throttle_duration_sec=5.0,
+                )
+                self.cmd_pub.publish(Twist())
+                return
+            command = self.escort.compute(self._position, self._yaw, self._rover_pose)
+        else:
+            command = self.controller.compute(self._position, self._yaw)
 
         # gz-sim's VelocityControl interprets the twist in the *body* frame, so
         # the map-frame setpoint must be rotated by the inverse of the current
@@ -167,8 +218,14 @@ class DroneExplorerNode(Node):
         status = ExplorationStatus()
         status.header = make_header(self, self.config.frames.map_frame)
         status.phase = command.phase.value
-        status.at_scan_altitude = command.phase in (FlightPhase.SCANNING, FlightPhase.COMPLETE)
-        status.complete = command.phase is FlightPhase.COMPLETE
+        status.at_scan_altitude = command.phase in (
+            FlightPhase.SCANNING,
+            FlightPhase.COMPLETE,
+            FlightPhase.ESCORTING,
+        )
+        # Escorting means the sweep is behind us: the mission has already left
+        # EXPLORING, and reporting "incomplete" here would stall a re-entry.
+        status.complete = command.phase in (FlightPhase.COMPLETE, FlightPhase.ESCORTING)
         status.waypoint_index = int(command.waypoint_index)
         status.waypoint_count = int(len(self.waypoints))
         status.coverage_fraction = float(self.controller.coverage_fraction)

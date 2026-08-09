@@ -24,6 +24,8 @@ class FlightPhase(str, Enum):
     CLIMBING = "CLIMBING"
     SCANNING = "SCANNING"
     COMPLETE = "COMPLETE"
+    #: Holding station on the rover instead of flying the coverage pattern.
+    ESCORTING = "ESCORTING"
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,99 @@ class WaypointFlightController:
         )
         return FlightCommand(
             FlightPhase.COMPLETE, np.array([0.0, 0.0, vertical]), yaw_rate, self._index, 0.0
+        )
+
+
+class EscortController:
+    """Hold station on the rover so it stays in the drone's camera.
+
+    The drone parks *behind* the rover along its heading, by exactly the
+    distance at which a camera depressed by ``depression_rad`` points at the
+    rover: ``(altitude - rover_height) / tan(depression)``. Any other offset
+    would put the rover at the edge of the frame or out of it entirely.
+
+    Yaw tracks the bearing to the rover rather than the rover's own heading,
+    so the rover stays centred horizontally even while it turns on the spot.
+    """
+
+    def __init__(
+        self,
+        *,
+        altitude_m: float,
+        depression_rad: float,
+        speed_mps: float,
+        distance_scale: float = 1.0,
+        rover_height_m: float = 0.3,
+        position_kp: float = 1.2,
+        yaw_kp: float = 1.5,
+        max_yaw_rate: float = 1.2,
+        vertical_speed_mps: float = 1.2,
+    ) -> None:
+        if altitude_m <= rover_height_m:
+            raise ValueError("the drone must fly above the rover")
+        if not 0.0 < depression_rad <= math.pi / 2.0:
+            raise ValueError("camera depression must lie in (0, pi/2]")
+        if speed_mps <= 0.0:
+            raise ValueError("escort speed must be positive")
+        self.altitude_m = float(altitude_m)
+        self.depression_rad = float(depression_rad)
+        self.speed_mps = float(speed_mps)
+        self.distance_scale = float(distance_scale)
+        self.rover_height_m = float(rover_height_m)
+        self.position_kp = float(position_kp)
+        self.yaw_kp = float(yaw_kp)
+        self.max_yaw_rate = float(max_yaw_rate)
+        self.vertical_speed_mps = float(vertical_speed_mps)
+
+    @property
+    def standoff_m(self) -> float:
+        """How far behind the rover the drone holds station."""
+        height = self.altitude_m - self.rover_height_m
+        return self.distance_scale * height / math.tan(self.depression_rad)
+
+    def station_for(self, rover_pose: Sequence[float]) -> np.ndarray:
+        """Where the drone should be, given the rover's ``(x, y, yaw)``."""
+        pose = np.asarray(rover_pose, dtype=float)
+        behind = np.array([math.cos(pose[2]), math.sin(pose[2])]) * self.standoff_m
+        return np.array([pose[0] - behind[0], pose[1] - behind[1], self.altitude_m])
+
+    def compute(
+        self,
+        drone_position: Sequence[float],
+        drone_yaw: float,
+        rover_pose: Sequence[float],
+    ) -> FlightCommand:
+        position = np.asarray(drone_position, dtype=float).reshape(3)
+        rover = np.asarray(rover_pose, dtype=float)
+        station = self.station_for(rover)
+
+        error = station - position
+        horizontal = error[:2]
+        distance = float(np.linalg.norm(horizontal))
+        if distance > 1e-6:
+            # Proportional, saturated: close the gap quickly but never command
+            # more than the escort speed, so the drone cannot outrun its own
+            # camera and blur every frame.
+            speed = min(self.speed_mps, self.position_kp * distance)
+            horizontal = horizontal / distance * speed
+        vertical = float(
+            np.clip(error[2], -self.vertical_speed_mps, self.vertical_speed_mps)
+        )
+
+        bearing = math.atan2(rover[1] - position[1], rover[0] - position[0])
+        yaw_rate = float(
+            np.clip(
+                self.yaw_kp * normalize_angle(bearing - float(drone_yaw)),
+                -self.max_yaw_rate,
+                self.max_yaw_rate,
+            )
+        )
+        return FlightCommand(
+            FlightPhase.ESCORTING,
+            np.array([horizontal[0], horizontal[1], vertical]),
+            yaw_rate,
+            0,
+            distance,
         )
 
 

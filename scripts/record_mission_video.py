@@ -23,6 +23,7 @@ the renderer are simplified. The Gazebo evidence lives in CI; use
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections import deque
 from pathlib import Path
@@ -56,7 +57,9 @@ BG = (26, 26, 30)
 INK = (235, 235, 240)
 MUTED = (150, 150, 160)
 GRID_FREE = (58, 62, 58)
-GRID_OCC = (70, 90, 150)
+GRID_OCC = (60, 70, 190)
+OBSTACLE_C = (80, 110, 235)
+VISITED_C = (150, 150, 155)
 ACCENT = (90, 200, 255)
 DRONE_C = (60, 190, 255)
 ROVER_C = (255, 190, 60)
@@ -133,14 +136,50 @@ class MissionRecorder:
                 cv2.polylines(panel, [pts], False, tuple(int(c * 0.45) for c in colour),
                               1, cv2.LINE_AA)
 
+        # Mapped obstacles, outlined and named. The occupancy cells alone read
+        # as scenery; a reviewer should be able to see at a glance that the
+        # arena contains obstacles and that the route goes around them.
+        stations = [record.position[:2] for record in runner.world_model.targets()]
+        for obstacle in runner.world_model.obstacles():
+            centre = np.asarray(obstacle.centre, dtype=float)
+            half = np.asarray(obstacle.size_xy, dtype=float) / 2.0
+            # An extracted blob sitting on a discovered station *is* that
+            # station, not a separate obstacle.
+            if any(float(np.linalg.norm(centre - s)) < 1.5 for s in stations):
+                continue
+            if max(obstacle.size_xy) < 1.2:
+                continue  # the rover's own footprint, seen from above
+            top_left = self.to_px(centre - half)
+            bottom_right = self.to_px(centre + half)
+            cv2.rectangle(panel, top_left, bottom_right, OBSTACLE_C, 2, cv2.LINE_AA)
+            label_at = (min(top_left[0], bottom_right[0]) + 4,
+                        min(top_left[1], bottom_right[1]) - 6)
+            put(panel, "OBSTACLE", label_at, 0.40, OBSTACLE_C)
+
         # Discovered stations - only the ones perception has actually decoded.
+        verified = set(runner.orchestrator.verified_qrs)
+        target_now = runner.orchestrator.current_target
         for record in runner.world_model.targets():
             px = self.to_px(record.position)
-            colour = OK_C if record.status is TargetStatus.CONFIRMED else (60, 200, 255)
-            cv2.circle(panel, px, 11, colour, 2, cv2.LINE_AA)
-            put(panel, record.qr_id, (px[0] + 15, px[1] + 5), 0.45, colour)
+            if record.qr_id in verified:
+                colour, ring = VISITED_C, 2
+            elif record.qr_id == target_now:
+                colour, ring = ACCENT, 3
+            elif record.status is TargetStatus.CONFIRMED:
+                colour, ring = OK_C, 2
+            else:
+                colour, ring = (60, 200, 255), 2
+            cv2.circle(panel, px, 11, colour, ring, cv2.LINE_AA)
+            suffix = " [done]" if record.qr_id in verified else ""
+            put(panel, record.qr_id + suffix, (px[0] + 15, px[1] + 5), 0.45, colour)
             if record.status is not TargetStatus.CONFIRMED:
                 put(panel, f"{record.observation_count}/3", (px[0] + 15, px[1] + 20), 0.36, MUTED)
+
+        home = runner.orchestrator.home_xy
+        if home is not None:
+            hpx = self.to_px(home)
+            cv2.drawMarker(panel, hpx, PATH_C, cv2.MARKER_TILTED_CROSS, 16, 2)
+            put(panel, "HOME", (hpx[0] + 12, hpx[1] - 8), 0.40, PATH_C)
 
         # Vehicles.
         drone = runner.drone.position
@@ -179,7 +218,11 @@ class MissionRecorder:
         # Camera views: the actual pixels the detector sees.
         y = 124
         for label, image, width in (
-            ("drone camera (nadir)", runner._last_drone_frame, 280),
+            (
+                f"drone camera ({math.degrees(runner.config.drone.camera_depression_rad):.0f} deg down)",
+                runner._last_drone_frame,
+                280,
+            ),
             ("rover camera (forward)", runner._last_rover_frame, 280),
         ):
             put(panel, label, (18, y + 12), 0.42, MUTED)
@@ -193,6 +236,25 @@ class MissionRecorder:
                 cv2.rectangle(panel, (18, y), (18 + width, y + 100), (50, 50, 56), -1)
                 put(panel, "not streaming yet", (30, y + 55), 0.42, MUTED)
                 y += 114
+
+        orchestrator = runner.orchestrator
+        if orchestrator.tour:
+            legs = []
+            for payload in orchestrator.tour:
+                if payload in orchestrator.verified_qrs:
+                    legs.append(payload + " OK")
+                elif payload == orchestrator.current_target:
+                    legs.append(">" + payload)
+                else:
+                    legs.append(payload)
+            if runner.config.mission.return_home:
+                legs.append("HOME")
+            put(panel, "tour: " + "  ".join(legs), (18, y + 6), 0.40, ACCENT)
+            y += 18
+        put(panel, f"drone: {'escorting the rover' if runner._escorting else 'scanning'}"
+                   f"   camera {math.degrees(runner.config.drone.camera_depression_rad):.0f} deg down",
+            (18, y + 6), 0.40, DRONE_C)
+        y += 18
 
         summary = runner.world_model.summary()
         put(panel, f"targets confirmed : {summary['targets_confirmed']}/3   "
@@ -285,7 +347,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("-o", "--output", type=Path, default=Path("mission.mp4"))
     parser.add_argument("--fps", type=int, default=25)
-    parser.add_argument("--every", type=int, default=4, help="steps per recorded frame")
+    parser.add_argument("--every", type=int, default=6, help="steps per recorded frame")
     parser.add_argument("--hold-s", type=float, default=3.0, help="freeze on the verdict")
     parser.add_argument(
         "--gazebo-frames",
