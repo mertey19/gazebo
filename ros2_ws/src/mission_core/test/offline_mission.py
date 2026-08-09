@@ -92,6 +92,7 @@ class OfflineMissionRunner:
         dt: float = 0.1,
         max_sim_time_s: float = 900.0,
         logger: Optional[Callable[[str], None]] = None,
+        on_step: Optional[Callable[["OfflineMissionRunner", float], None]] = None,
     ) -> None:
         self.world = world
         self.config = config
@@ -99,6 +100,9 @@ class OfflineMissionRunner:
         self.dt = float(dt)
         self.max_sim_time_s = float(max_sim_time_s)
         self.logger = logger
+        #: Called once per simulation step with (runner, sim_time). Used by the
+        #: recorder to draw a frame; nothing in the mission depends on it.
+        self.on_step = on_step
 
         self.drone_camera = PinholeCamera.from_hfov(
             config.drone.camera.width,
@@ -180,6 +184,10 @@ class OfflineMissionRunner:
         self._last_perception_t = -math.inf
         self._last_map_publish_t = -math.inf
         self._verification_hits: List[str] = []
+        #: Most recent frame from each camera, kept so a recorder or a
+        #: debugger can show exactly what the detector was looking at.
+        self._last_drone_frame = None
+        self._last_rover_frame = None
         self.trace = MissionTrace(world_model=self.world_model)
 
     # -- logging ----------------------------------------------------------
@@ -206,6 +214,7 @@ class OfflineMissionRunner:
         """Render one drone frame, decode it, and fold results into the model."""
         pose = self._drone_camera_pose()
         image = self.world.render(pose, self.drone_camera)
+        self._last_drone_frame = image
         self.trace.drone_frames += 1
         try:
             detections = self.detector.detect(image, self.drone_camera)
@@ -252,6 +261,7 @@ class OfflineMissionRunner:
         """Look for a QR code from the rover's stopped position."""
         pose = self._rover_camera_pose()
         image = self.world.render(pose, self.rover_camera)
+        self._last_rover_frame = image
         self.trace.rover_frames += 1
         try:
             detections = self.detector.detect(image, self.rover_camera)
@@ -359,6 +369,9 @@ class OfflineMissionRunner:
             elif outputs.command is MissionCommand.START_VERIFICATION:
                 self._verification_hits.clear()
                 verified_qr = None
+
+            if self.on_step is not None:
+                self.on_step(self, now)
 
             if outputs.is_terminal:
                 break
