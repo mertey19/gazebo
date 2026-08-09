@@ -26,6 +26,10 @@ class FlightPhase(str, Enum):
     COMPLETE = "COMPLETE"
     #: Holding station on the rover instead of flying the coverage pattern.
     ESCORTING = "ESCORTING"
+    #: Flying back to the take-off point at cruise altitude.
+    RETURNING = "RETURNING"
+    #: Back on the ground where it started.
+    LANDED = "LANDED"
 
 
 @dataclass(frozen=True)
@@ -294,6 +298,99 @@ class EscortController:
         return FlightCommand(
             FlightPhase.ESCORTING,
             np.array([horizontal[0], horizontal[1], vertical]),
+            yaw_rate,
+            0,
+            distance,
+        )
+
+
+class ReturnHomeController:
+    """Fly back to the take-off point and land there.
+
+    Deliberately two stages rather than one diagonal descent: crossing the
+    arena at cruise altitude keeps the drone above everything it mapped, and
+    only then does it come straight down. A descent that begins early would
+    fly the drone through the airspace over obstacles and stations at an
+    altitude nobody checked.
+    """
+
+    def __init__(
+        self,
+        home_xy: Sequence[float],
+        *,
+        cruise_altitude_m: float,
+        speed_mps: float,
+        descend_speed_mps: float = 0.8,
+        arrive_tolerance_m: float = 0.4,
+        landed_altitude_m: float = 0.20,
+        position_kp: float = 1.0,
+        yaw_kp: float = 1.0,
+        max_yaw_rate: float = 0.8,
+        hold_yaw_rad: float = 0.0,
+    ) -> None:
+        if cruise_altitude_m <= landed_altitude_m:
+            raise ValueError("cruise altitude must be above the landing altitude")
+        if speed_mps <= 0.0 or descend_speed_mps <= 0.0:
+            raise ValueError("speeds must be positive")
+        self.home_xy = np.asarray(home_xy, dtype=float)[:2].copy()
+        self.cruise_altitude_m = float(cruise_altitude_m)
+        self.speed_mps = float(speed_mps)
+        self.descend_speed_mps = float(descend_speed_mps)
+        self.arrive_tolerance_m = float(arrive_tolerance_m)
+        self.landed_altitude_m = float(landed_altitude_m)
+        self.position_kp = float(position_kp)
+        self.yaw_kp = float(yaw_kp)
+        self.max_yaw_rate = float(max_yaw_rate)
+        self.hold_yaw_rad = float(hold_yaw_rad)
+        self._landed = False
+
+    @property
+    def landed(self) -> bool:
+        return self._landed
+
+    def compute(self, position_map: Sequence[float], yaw: float) -> FlightCommand:
+        position = np.asarray(position_map, dtype=float).reshape(3)
+        offset = self.home_xy - position[:2]
+        distance = float(np.linalg.norm(offset))
+        yaw_rate = float(
+            np.clip(
+                self.yaw_kp * normalize_angle(self.hold_yaw_rad - float(yaw)),
+                -self.max_yaw_rate,
+                self.max_yaw_rate,
+            )
+        )
+
+        if self._landed:
+            return FlightCommand(FlightPhase.LANDED, np.zeros(3), 0.0, 0, distance)
+
+        if distance > self.arrive_tolerance_m:
+            speed = min(self.speed_mps, self.position_kp * distance)
+            horizontal = offset / distance * speed
+            # Hold cruise height while crossing; only descend once overhead.
+            vertical = float(
+                np.clip(
+                    self.cruise_altitude_m - position[2],
+                    -self.descend_speed_mps,
+                    self.descend_speed_mps,
+                )
+            )
+            return FlightCommand(
+                FlightPhase.RETURNING,
+                np.array([horizontal[0], horizontal[1], vertical]),
+                yaw_rate,
+                0,
+                distance,
+            )
+
+        if position[2] <= self.landed_altitude_m:
+            self._landed = True
+            return FlightCommand(FlightPhase.LANDED, np.zeros(3), 0.0, 0, distance)
+
+        # Overhead: come straight down, still nudging towards the exact spot.
+        horizontal = offset * self.position_kp
+        return FlightCommand(
+            FlightPhase.RETURNING,
+            np.array([horizontal[0], horizontal[1], -self.descend_speed_mps]),
             yaw_rate,
             0,
             distance,

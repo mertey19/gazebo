@@ -357,3 +357,63 @@ def test_escort_rejects_impossible_geometry() -> None:
         EscortController(altitude_m=0.2, depression_rad=0.5, speed_mps=1.0)
     with pytest.raises(ValueError, match="depression"):
         EscortController(altitude_m=4.0, depression_rad=0.0, speed_mps=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Drone return to home
+# ---------------------------------------------------------------------------
+
+def test_drone_returns_to_its_take_off_point_and_lands() -> None:
+    from mission_core.exploration import KinematicDrone, ReturnHomeController
+
+    home = np.array([-8.0, -6.5])
+    controller = ReturnHomeController(home, cruise_altitude_m=4.0, speed_mps=2.2)
+    drone = KinematicDrone((7.0, -5.0, 4.0))
+
+    for _ in range(6000):
+        command = controller.compute(drone.position, drone.yaw)
+        drone.step(command.velocity_map, command.yaw_rate, 0.05)
+        if controller.landed:
+            break
+
+    assert controller.landed
+    assert float(np.linalg.norm(drone.position[:2] - home)) < 0.4
+    assert drone.position[2] <= controller.landed_altitude_m + 0.05
+
+
+def test_drone_crosses_at_cruise_height_before_descending() -> None:
+    """Descending on the diagonal would fly it over everything it mapped.
+
+    The arena contains 1.5 m obstacles and 1.05 m stations; a drone that
+    started losing height as soon as it turned for home would cross that
+    airspace at an altitude nobody checked.
+    """
+    from mission_core.exploration import KinematicDrone, ReturnHomeController
+
+    home = np.array([-8.0, -6.5])
+    controller = ReturnHomeController(home, cruise_altitude_m=4.0, speed_mps=2.2)
+    drone = KinematicDrone((7.0, -5.0, 4.0))
+
+    for _ in range(6000):
+        distance = float(np.linalg.norm(drone.position[:2] - home))
+        if distance > 1.0:
+            assert drone.position[2] > 3.5, (
+                f"lost height to {drone.position[2]:.2f} m while still "
+                f"{distance:.2f} m from home"
+            )
+        command = controller.compute(drone.position, drone.yaw)
+        drone.step(command.velocity_map, command.yaw_rate, 0.05)
+        if controller.landed:
+            break
+    assert controller.landed
+
+
+def test_a_landed_drone_stays_put() -> None:
+    from mission_core.exploration import FlightPhase, ReturnHomeController
+
+    controller = ReturnHomeController((0.0, 0.0), cruise_altitude_m=4.0, speed_mps=2.0)
+    command = controller.compute((0.0, 0.0, 0.05), 0.0)
+    assert controller.landed
+    assert command.phase is FlightPhase.LANDED
+    again = controller.compute((0.0, 0.0, 0.05), 0.0)
+    assert float(np.linalg.norm(again.velocity_map)) == 0.0

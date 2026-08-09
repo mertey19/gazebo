@@ -21,6 +21,7 @@ from std_srvs.srv import Trigger
 from mission_core.exploration import (
     EscortController,
     FlightPhase,
+    ReturnHomeController,
     WaypointFlightController,
     lawnmower_waypoints,
 )
@@ -81,6 +82,11 @@ class DroneExplorerNode(Node):
         )
         self._escorting = False
         self._rover_pose: Optional[np.ndarray] = None
+        #: Built once the drone's own take-off point is known, which is simply
+        #: where it was standing when the first odometry arrived.
+        self.home_controller: Optional[ReturnHomeController] = None
+        self._returning = False
+        self._takeoff_xy: Optional[np.ndarray] = None
 
         self._position: Optional[np.ndarray] = None
         self._yaw = 0.0
@@ -104,6 +110,7 @@ class DroneExplorerNode(Node):
         )
         self.create_service(Trigger, "~/start", self._on_start)
         self.create_service(Trigger, "~/follow", self._on_follow)
+        self.create_service(Trigger, "~/return_home", self._on_return_home)
         self.create_service(Trigger, "~/hold", self._on_hold)
         self.create_timer(1.0 / max(self.config.drone.control_rate_hz, 1e-3), self._control_step)
 
@@ -138,6 +145,14 @@ class DroneExplorerNode(Node):
             return
         self._position = position
         self._yaw = yaw
+        if self._takeoff_xy is None:
+            # Wherever the drone was standing when it first reported in is the
+            # spot it has to come back to. Nothing else needs to know it.
+            self._takeoff_xy = position[:2].copy()
+            self.get_logger().info(
+                f"[DRONE] take-off point recorded at "
+                f"({self._takeoff_xy[0]:.2f}, {self._takeoff_xy[1]:.2f})"
+            )
 
     def _on_start(self, _request, response):
         self.controller.start()
@@ -168,6 +183,29 @@ class DroneExplorerNode(Node):
         self.get_logger().info(f"[DRONE] {response.message}")
         return response
 
+    def _on_return_home(self, _request, response):
+        """Break station and fly back to the take-off point."""
+        if self._takeoff_xy is None:
+            response.success = False
+            response.message = "no odometry yet, so the take-off point is unknown"
+            self.get_logger().error(f"[DRONE] {response.message}")
+            return response
+        self.home_controller = ReturnHomeController(
+            self._takeoff_xy,
+            cruise_altitude_m=self.config.drone.scan_altitude_m,
+            speed_mps=self.config.drone.return_speed_mps,
+            descend_speed_mps=self.config.drone.descend_speed_mps,
+            landed_altitude_m=self.config.drone.landed_altitude_m,
+        )
+        self._escorting = False
+        self._returning = True
+        response.success = True
+        response.message = (
+            f"returning to ({self._takeoff_xy[0]:.2f}, {self._takeoff_xy[1]:.2f})"
+        )
+        self.get_logger().info(f"[DRONE] {response.message}")
+        return response
+
     def _on_hold(self, _request, response):
         self.controller._phase = FlightPhase.COMPLETE  # station-keep at altitude
         response.success = True
@@ -184,7 +222,9 @@ class DroneExplorerNode(Node):
             self.cmd_pub.publish(Twist())
             return
 
-        if self._escorting:
+        if self._returning and self.home_controller is not None:
+            command = self.home_controller.compute(self._position, self._yaw)
+        elif self._escorting:
             if self._rover_pose is None:
                 self.get_logger().warn(
                     "[DRONE] escorting but the rover pose is unknown; holding",
@@ -225,7 +265,14 @@ class DroneExplorerNode(Node):
         )
         # Escorting means the sweep is behind us: the mission has already left
         # EXPLORING, and reporting "incomplete" here would stall a re-entry.
-        status.complete = command.phase in (FlightPhase.COMPLETE, FlightPhase.ESCORTING)
+        status.complete = command.phase in (
+            FlightPhase.COMPLETE,
+            FlightPhase.ESCORTING,
+            FlightPhase.RETURNING,
+            FlightPhase.LANDED,
+        )
+        status.escorting = command.phase is FlightPhase.ESCORTING
+        status.returned_home = command.phase is FlightPhase.LANDED
         status.waypoint_index = int(command.waypoint_index)
         status.waypoint_count = int(len(self.waypoints))
         status.coverage_fraction = float(self.controller.coverage_fraction)

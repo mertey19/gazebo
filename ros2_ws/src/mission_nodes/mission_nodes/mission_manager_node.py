@@ -75,6 +75,7 @@ class MissionManagerNode(Node):
         self.declare_parameter("rover_stop_service", "/rover_path_follower/stop")
         self.declare_parameter("rover_search_service", "/rover_path_follower/search")
         self.declare_parameter("drone_follow_service", "/drone_explorer/follow")
+        self.declare_parameter("drone_return_service", "/drone_explorer/return_home")
 
         self.map_frame = self.config.frames.map_frame
         # Local mirror of the digital twin. The world_model node is the single
@@ -151,6 +152,9 @@ class MissionManagerNode(Node):
         )
         self.drone_follow_client = self.create_client(
             Trigger, str(self.get_parameter("drone_follow_service").value)
+        )
+        self.drone_return_client = self.create_client(
+            Trigger, str(self.get_parameter("drone_return_service").value)
         )
 
         self.create_service(PlanPath, "/mission/plan_path", self._on_plan_path)
@@ -341,6 +345,9 @@ class MissionManagerNode(Node):
                 rover_failure_detail=self._tracking.detail if self._tracking else "",
                 verified_qr=self._verified_qr,
                 path_published=self._path_published,
+                drone_home=bool(
+                    self._exploration.returned_home if self._exploration else False
+                ),
             )
             outputs = orchestrator.update(inputs)
 
@@ -373,6 +380,8 @@ class MissionManagerNode(Node):
             )
         elif outputs.command is MissionCommand.START_ESCORT:
             self._call_trigger(self.drone_follow_client, "drone escort")
+        elif outputs.command is MissionCommand.START_DRONE_RETURN:
+            self._call_trigger(self.drone_return_client, "drone return home")
         elif outputs.command is MissionCommand.START_VERIFICATION:
             # Each attempt must earn its own consecutive-read quorum; stale
             # reads from an earlier sweep cannot complete a later attempt.

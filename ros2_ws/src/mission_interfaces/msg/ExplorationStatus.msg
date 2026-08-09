@@ -5,6 +5,8 @@ std_msgs/Header header
 string phase                     # GROUNDED | CLIMBING | SCANNING | COMPLETE
 bool at_scan_altitude
 bool complete
+bool escorting               # holding station on the rover
+bool returned_home           # back on the ground at the take-off point
 uint32 waypoint_index
 uint32 waypoint_count
 float64 coverage_fraction        # [0, 1]

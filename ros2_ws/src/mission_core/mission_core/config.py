@@ -104,6 +104,11 @@ class DroneConfig:
     #: of the frame, scaled by this factor.
     follow_distance_scale: float = 1.0
     follow_speed_mps: float = 2.2
+    #: Speed of the flight back to the take-off point, and of the descent.
+    return_speed_mps: float = 2.2
+    descend_speed_mps: float = 0.8
+    #: Below this height the drone counts as landed.
+    landed_altitude_m: float = 0.20
     camera: CameraConfig = field(default_factory=CameraConfig)
 
 

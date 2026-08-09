@@ -175,6 +175,11 @@ class MissionRecorder:
             if record.status is not TargetStatus.CONFIRMED:
                 put(panel, f"{record.observation_count}/3", (px[0] + 15, px[1] + 20), 0.36, MUTED)
 
+        dpad = runner.drone_home.home_xy
+        dpx_home = self.to_px(dpad)
+        cv2.drawMarker(panel, dpx_home, DRONE_C, cv2.MARKER_SQUARE, 14, 2)
+        put(panel, "DRONE PAD", (dpx_home[0] + 12, dpx_home[1] + 18), 0.40, DRONE_C)
+
         home = runner.orchestrator.home_xy
         if home is not None:
             hpx = self.to_px(home)
@@ -251,7 +256,15 @@ class MissionRecorder:
                 legs.append("HOME")
             put(panel, "tour: " + "  ".join(legs), (18, y + 6), 0.40, ACCENT)
             y += 18
-        put(panel, f"drone: {'escorting the rover' if runner._escorting else 'scanning'}"
+        if runner.drone_home.landed:
+            drone_state = "landed at its take-off point"
+        elif runner._returning_drone:
+            drone_state = "returning home"
+        elif runner._escorting:
+            drone_state = "escorting the rover"
+        else:
+            drone_state = "scanning"
+        put(panel, f"drone: {drone_state}"
                    f"   camera {math.degrees(runner.config.drone.camera_depression_rad):.0f} deg down",
             (18, y + 6), 0.40, DRONE_C)
         y += 18

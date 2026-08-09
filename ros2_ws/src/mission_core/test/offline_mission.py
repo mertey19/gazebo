@@ -26,6 +26,7 @@ from mission_core.exploration import (
     EscortController,
     FlightPhase,
     KinematicDrone,
+    ReturnHomeController,
     WaypointFlightController,
     lawnmower_waypoints,
 )
@@ -183,6 +184,14 @@ class OfflineMissionRunner:
             distance_scale=config.drone.follow_distance_scale,
         )
         self._escorting = False
+        self.drone_home = ReturnHomeController(
+            np.asarray(drone_start, dtype=float)[:2],
+            cruise_altitude_m=config.drone.scan_altitude_m,
+            speed_mps=config.drone.return_speed_mps,
+            descend_speed_mps=config.drone.descend_speed_mps,
+            landed_altitude_m=config.drone.landed_altitude_m,
+        )
+        self._returning_drone = False
         self.orchestrator = MissionOrchestrator(
             config, self.world_model, requested_qr=self.requested_qr
         )
@@ -315,10 +324,15 @@ class OfflineMissionRunner:
                 MissionState.SENDING_PATH,
                 MissionState.ROVER_NAVIGATING,
                 MissionState.VERIFYING_TARGET,
+                # The drone escorts the rover home and then flies back itself,
+                # so it must keep being stepped through the final state too.
+                MissionState.RETURNING_HOME,
             ):
                 if self.flight.phase is FlightPhase.GROUNDED:
                     self.flight.start()
-                if self._escorting:
+                if self._returning_drone:
+                    command = self.drone_home.compute(self.drone.position, self.drone.yaw)
+                elif self._escorting:
                     command = self.escort.compute(
                         self.drone.position, self.drone.yaw, self.rover.pose
                     )
@@ -327,9 +341,13 @@ class OfflineMissionRunner:
                 self.drone.step(command.velocity_map, command.yaw_rate, self.dt)
                 self.trace.drone_track.append(self.drone.position.copy())
 
-                if self._escorting or self.flight.phase in (
-                    FlightPhase.SCANNING,
-                    FlightPhase.COMPLETE,
+                # A landed drone's camera is pressed against the ground: the
+                # detector correctly rejects those frames as uniform, so stop
+                # asking it to look at them.
+                airborne = not self.drone_home.landed
+                if airborne and (
+                    self._escorting
+                    or self.flight.phase in (FlightPhase.SCANNING, FlightPhase.COMPLETE)
                 ):
                     if now - self._last_perception_t >= self._perception_period:
                         self._last_perception_t = now
@@ -376,6 +394,7 @@ class OfflineMissionRunner:
                     rover_failure_detail=rover_failure_detail,
                     verified_qr=verified_qr,
                     path_published=path_published,
+                    drone_home=self.drone_home.landed,
                 )
             )
             for message in outputs.messages:
@@ -383,6 +402,9 @@ class OfflineMissionRunner:
 
             if outputs.command is MissionCommand.START_ESCORT:
                 self._escorting = True
+            if outputs.command is MissionCommand.START_DRONE_RETURN:
+                self._returning_drone = True
+                self._escorting = False
 
             if outputs.command is MissionCommand.PREPARE_REPLAN:
                 # Mirrors mission_manager_node: a new leg starts from a clean

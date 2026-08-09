@@ -46,6 +46,8 @@ class MissionCommand(str, Enum):
     #: Stop flying the coverage pattern and hold station on the rover, so the
     #: drone keeps eyes on it for the whole drive.
     START_ESCORT = "START_ESCORT"
+    #: Rover is home; the drone may now fly back to its take-off point and land.
+    START_DRONE_RETURN = "START_DRONE_RETURN"
     STOP_ROVER = "STOP_ROVER"
 
 
@@ -64,6 +66,8 @@ class MissionInputs:
     #: Payload the rover's own camera has confirmed at the goal, if any.
     verified_qr: Optional[str] = None
     path_published: bool = False
+    #: True once the drone is back on the ground at its take-off point.
+    drone_home: bool = False
 
 
 @dataclass
@@ -137,6 +141,8 @@ class MissionOrchestrator:
         self._leg = 0
         self._returning_home = False
         self._escorting = False
+        self._drone_return_requested = False
+        self._drone_home_confirmed = False
         #: Where the rover began; also where it drives back to.
         self.home_xy: Optional[np.ndarray] = None
         #: Payload verified at each station the rover actually reached.
@@ -237,6 +243,8 @@ class MissionOrchestrator:
             self.machine.started_at = now
         if inputs.rover_pose is not None:
             self.rover_final_xy = np.asarray(inputs.rover_pose, dtype=float)[:2].copy()
+        if inputs.drone_home:
+            self._drone_home_confirmed = True
 
         # Global watchdog: no state may run forever.
         if now - self._started_at > self.config.mission.mission_timeout_s:
@@ -665,17 +673,41 @@ class MissionOrchestrator:
                 outputs,
             )
         started = self._navigation_started_at or now
-        if now - started > self.config.rover.navigation_timeout_s:
-            return self._fail(
-                FailureReason.NAVIGATION_TIMEOUT,
-                f"the rover did not get home within "
-                f"{self.config.rover.navigation_timeout_s:.0f} s",
-                now,
-                outputs,
-            )
         if not inputs.rover_goal_reached:
+            # The rover's own budget. Once it is home the clock is restarted
+            # for the drone, which would otherwise inherit whatever was left
+            # of the drive and be timed out for the rover's slowness.
+            if now - started > self.config.rover.navigation_timeout_s:
+                return self._fail(
+                    FailureReason.NAVIGATION_TIMEOUT,
+                    f"the rover did not get home within "
+                    f"{self.config.rover.navigation_timeout_s:.0f} s",
+                    now,
+                    outputs,
+                )
             return outputs
-        outputs.messages.append("[ROVER] Home")
+
+        # The rover is home. The drone escorted it the whole way, so only now
+        # does it break station and fly back to its own take-off point.
+        if not self._drone_return_requested:
+            self._drone_return_requested = True
+            self._navigation_started_at = now
+            outputs.messages.append("[ROVER] Home")
+            outputs.messages.append("[DRONE] Returning to the take-off point")
+            outputs.command = MissionCommand.START_DRONE_RETURN
+            return outputs
+
+        if not inputs.drone_home:
+            if now - started > self.config.rover.navigation_timeout_s:
+                return self._fail(
+                    FailureReason.NAVIGATION_TIMEOUT,
+                    "the drone did not get back to its take-off point in time",
+                    now,
+                    outputs,
+                )
+            return outputs
+
+        outputs.messages.append("[DRONE] Landed")
         return self._succeed(now, outputs)
 
     def _aggregate_report(self) -> ValidationReport:
@@ -705,6 +737,16 @@ class MissionOrchestrator:
             )
         )
         if self.config.mission.return_home:
+            report.add(
+                Check(
+                    "drone_returned_home",
+                    self._drone_return_requested and self._drone_home_confirmed,
+                    "the drone flew back to its take-off point and landed"
+                    if self._drone_home_confirmed
+                    else "the drone did not report landing at its take-off point",
+                    failure_reason=FailureReason.NAVIGATION_TIMEOUT,
+                )
+            )
             home = self.home_xy
             final = self.rover_final_xy
             distance = (

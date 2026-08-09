@@ -73,6 +73,11 @@ drone:
   # altitude / tan(depression) so the rover sits mid-frame.
   follow_distance_scale: 1.0
   follow_speed_mps: 2.2
+  # The drone escorts the rover all the way home, then flies back to its own
+  # take-off point at cruise altitude and only then descends.
+  return_speed_mps: 2.2
+  descend_speed_mps: 0.8
+  landed_altitude_m: 0.20
   camera:
     width: 1280
     height: 960
