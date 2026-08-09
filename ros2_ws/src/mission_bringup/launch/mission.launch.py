@@ -41,8 +41,15 @@ from launch_ros.substitutions import FindPackageShare
 #           matrix_to_quaternion(R_BODY_TO_FORWARD_OPTICAL))"
 # ---------------------------------------------------------------------------
 
-#: base_link -> camera_optical_frame for a nadir camera (x right, y down, z fwd).
-NADIR_OPTICAL_QUAT = ("-0.7071067811865475", "0.7071067811865476", "0.0", "0.0")
+#: base_link -> camera_optical_frame for the drone camera, pitched 30 degrees
+#: below horizontal. Printed by matrix_to_quaternion(optical_from_depression(
+#: config.drone.camera_depression_rad)); a test re-derives it from the config.
+DRONE_OPTICAL_QUAT = (
+    "-0.6123724356957946",
+    "0.6123724356957946",
+    "-0.35355339059327373",
+    "0.35355339059327384",
+)
 #: base_link -> camera_optical_frame for a forward camera (REP-103 optical).
 FORWARD_OPTICAL_QUAT = ("0.5", "-0.5", "0.5", "-0.5")
 
@@ -178,7 +185,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
         _static_tf(
             "drone_camera_optical", "drone/base_link", "drone/camera_optical_frame",
-            DRONE_CAMERA_XYZ, NADIR_OPTICAL_QUAT,
+            DRONE_CAMERA_XYZ, DRONE_OPTICAL_QUAT,
         ),
         _static_tf(
             "drone_lidar", "drone/base_link", "drone/lidar_link",

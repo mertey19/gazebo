@@ -30,8 +30,8 @@ from mission_core.exploration import (
 )
 from mission_core.geometry import (
     R_BODY_TO_FORWARD_OPTICAL,
-    R_BODY_TO_NADIR_OPTICAL,
     Transform,
+    optical_from_depression,
 )
 from mission_core.mission_state import MissionState
 from mission_core.occupancy import GridMetadata, OccupancyMapper
@@ -199,7 +199,10 @@ class OfflineMissionRunner:
     # -- sensing ----------------------------------------------------------
     def _drone_camera_pose(self) -> Transform:
         return camera_pose_from_body(
-            self.drone.position, self.drone.yaw, DRONE_CAMERA_MOUNT, R_BODY_TO_NADIR_OPTICAL
+            self.drone.position,
+            self.drone.yaw,
+            DRONE_CAMERA_MOUNT,
+            optical_from_depression(self.config.drone.camera_depression_rad),
         )
 
     def _rover_camera_pose(self) -> Transform:

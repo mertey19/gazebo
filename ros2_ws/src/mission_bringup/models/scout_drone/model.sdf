@@ -60,14 +60,20 @@
       </collision>
 
       <!--
-        Nadir camera. gz cameras look along their local +X, so a +90 deg pitch
-        points the optical axis straight down. The mount offset (0.10, 0,
-        -0.08) is mirrored by DRONE_CAMERA_MOUNT in the offline harness and by
-        the static transform published in mission.launch.py; all three must
-        agree or every target lands offset along its viewing ray.
+        Forward-down camera. The mount offset (0.10, 0, -0.08) is mirrored by
+        DRONE_CAMERA_MOUNT in the offline harness and by the static transform
+        published in mission.launch.py; all three must agree or every target
+        lands offset along its viewing ray.
       -->
       <sensor name="down_camera" type="camera">
-        <pose>0.10 0 -0.08 0 1.5707963 0</pose>
+        <!-- Pitched 30 degrees below horizontal (drone.camera_depression_rad).
+             gz cameras look along their local +X, so the pitch *is* the
+             depression angle. A depressed camera reads a station's vertical
+             faces almost head-on instead of foreshortening its top plate, but
+             it looks at ground ahead of the vehicle rather than beneath it -
+             so the resolution and coverage figures come from the slant range,
+             not from the altitude. -->
+        <pose>0.10 0 -0.08 0 0.5235988 0</pose>
         <always_on>1</always_on>
         <update_rate>6</update_rate>
         <visualize>false</visualize>

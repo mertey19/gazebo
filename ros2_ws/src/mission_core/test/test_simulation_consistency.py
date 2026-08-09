@@ -31,8 +31,8 @@ import yaml
 from mission_core.config import load_mission_config
 from mission_core.geometry import (
     R_BODY_TO_FORWARD_OPTICAL,
-    R_BODY_TO_NADIR_OPTICAL,
     matrix_to_quaternion,
+    optical_from_depression,
 )
 
 import offline_mission
@@ -176,10 +176,15 @@ def test_sensor_mount_agrees_everywhere(
     )
 
 
-def test_launch_optical_quaternions_are_the_derived_ones(launch_constants) -> None:
-    """The hand-entered TF quaternions must equal the code's rotation matrices."""
+def test_launch_optical_quaternions_are_the_derived_ones(launch_constants, config) -> None:
+    """The hand-entered TF quaternions must equal the code's rotation matrices.
+
+    The drone's is not a fixed constant any more: it follows
+    drone.camera_depression_rad, so it is re-derived from the configuration
+    rather than compared against a remembered number.
+    """
     for key, matrix in (
-        ("NADIR_OPTICAL_QUAT", R_BODY_TO_NADIR_OPTICAL),
+        ("DRONE_OPTICAL_QUAT", optical_from_depression(config.drone.camera_depression_rad)),
         ("FORWARD_OPTICAL_QUAT", R_BODY_TO_FORWARD_OPTICAL),
     ):
         launch_quat = np.array([float(v) for v in launch_constants[key]])
@@ -738,3 +743,41 @@ def test_map_to_odom_is_identity_for_both_vehicles(launch_constants) -> None:
     for name in ("map_to_drone_odom", "map_to_rover_odom"):
         block = text.split(f'"{name}"', 1)[1][:220]
         assert '("0.0", "0.0", "0.0")' in block, f"{name} is not an identity translation"
+
+
+def test_drone_camera_pitch_matches_the_configured_depression(sdf_models, config) -> None:
+    """gz cameras look along +X, so the SDF pitch *is* the depression angle.
+
+    A mismatch here points the real camera somewhere other than where every
+    range, coverage and TF calculation assumes it points.
+    """
+    _, rpy = parse_pose(find_sensor(sdf_models["scout_drone"], "down_camera").find("pose").text)
+    assert rpy[0] == pytest.approx(0.0, abs=1e-6), "the camera must not be rolled"
+    assert rpy[2] == pytest.approx(0.0, abs=1e-6), "the camera must not be yawed"
+    assert rpy[1] == pytest.approx(config.drone.camera_depression_rad, abs=1e-6)
+
+
+def test_scan_altitude_resolves_the_code_at_the_slant_range(config) -> None:
+    """With a depressed camera, resolution follows the slant range.
+
+    Using the altitude instead would overstate it by 1/sin(depression) - a
+    factor of two at 30 degrees, which is the difference between a decodable
+    code and a mission that never finds a target.
+    """
+    from mission_core.camera import PinholeCamera
+    from mission_core.qr import expected_pixels_per_module
+
+    camera = PinholeCamera.from_hfov(
+        config.drone.camera.width, config.drone.camera.height,
+        config.drone.camera.horizontal_fov_rad,
+    )
+    slant = config.station_slant_range_m()
+    assert slant > config.drone.scan_altitude_m, "a depressed camera looks further than it is high"
+    for payload in config.mission.known_payloads:
+        ppm = expected_pixels_per_module(camera, config.code_size_m(payload), slant, payload)
+        assert ppm >= config.perception.min_pixels_per_module
+
+
+def test_lane_spacing_is_covered_by_the_downward_lidar(config) -> None:
+    """The grid comes from the lidar, so lanes must overlap *its* cone."""
+    assert config.drone.lane_spacing_m < 2.0 * config.drone.scan_altitude_m

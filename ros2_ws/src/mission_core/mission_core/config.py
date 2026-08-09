@@ -60,6 +60,10 @@ class MissionConfigSection:
     #: the plate size this fixes the code's physical size, which is what the
     #: detector's corners actually bound.
     qr_quiet_zone_modules: int = 4
+    #: Height of a station's plate centre above the ground, in metres. A
+    #: property of the target hardware (pedestal + half the cube), and what
+    #: the slant range to a station is measured against.
+    station_plate_centre_height_m: float = 0.65
     mission_timeout_s: float = 600.0
     #: Where the mission area begins and ends, in the ``map`` frame.
     area_min_xy: List[float] = field(default_factory=lambda: [-11.0, -11.0])
@@ -68,7 +72,9 @@ class MissionConfigSection:
 
 @dataclass(frozen=True)
 class DroneConfig:
-    scan_altitude_m: float = 6.0
+    #: 4.0 m with a 30 degree camera puts the station plates at a 6.7 m slant
+    #: range, which resolves ~4.6 px per QR module. validate() enforces it.
+    scan_altitude_m: float = 4.0
     takeoff_speed_mps: float = 1.2
     scan_speed_mps: float = 1.6
     #: Spacing between lawnmower legs. Must be < camera ground footprint.
@@ -83,6 +89,15 @@ class DroneConfig:
     #: is complete rather than stopping at the first useful sighting.
     finish_scan_after_target_found: bool = True
     control_rate_hz: float = 30.0
+    #: How far below horizontal the drone camera points. pi/2 is straight
+    #: down; 30 degrees looks ahead of the vehicle and sees a station's
+    #: vertical faces almost head-on instead of foreshortening its top plate.
+    camera_depression_rad: float = 0.5235988
+    #: Where the drone parks relative to the rover once it is escorting it:
+    #: behind by (altitude / tan(depression)) so the rover sits in the middle
+    #: of the frame, scaled by this factor.
+    follow_distance_scale: float = 1.0
+    follow_speed_mps: float = 2.2
     camera: CameraConfig = field(default_factory=CameraConfig)
 
 
@@ -215,11 +230,26 @@ class MissionConfig:
         """Total inflation applied to obstacles for planning."""
         return self.planner.rover_radius_m + self.planner.obstacle_safety_margin_m
 
+    def station_slant_range_m(self) -> float:
+        """Distance from the drone camera to a station plate it is aimed at.
+
+        With a depressed camera the plate is ahead of the vehicle, not below
+        it, so every resolution and coverage figure has to come from this
+        slant range rather than from the altitude.
+        """
+        height = self.drone.scan_altitude_m - self.mission.station_plate_centre_height_m
+        return height / math.sin(self.drone.camera_depression_rad)
+
     def camera_ground_footprint_m(self) -> float:
-        """Width of the drone camera's ground footprint at scan altitude."""
-        return 2.0 * self.drone.scan_altitude_m * math.tan(
+        """Cross-track width of the camera swath where it meets a station."""
+        return 2.0 * self.station_slant_range_m() * math.tan(
             self.drone.camera.horizontal_fov_rad / 2.0
         )
+
+    def camera_ground_offset_m(self) -> float:
+        """How far ahead of the drone the camera axis meets the ground."""
+        height = self.drone.scan_altitude_m - self.mission.station_plate_centre_height_m
+        return height / math.tan(self.drone.camera_depression_rad)
 
     def code_size_m(self, payload: str) -> float:
         """Physical side length of the code area for one payload."""
@@ -261,15 +291,30 @@ class MissionConfig:
         )
         for payload in self.mission.known_payloads:
             pixels_per_module = expected_pixels_per_module(
-                camera, self.code_size_m(payload), self.drone.scan_altitude_m, payload
+                camera, self.code_size_m(payload), self.station_slant_range_m(), payload
             )
             if pixels_per_module < self.perception.min_pixels_per_module:
                 problems.append(
-                    f"at {self.drone.scan_altitude_m:.1f} m the drone camera resolves only "
+                    f"at a {self.station_slant_range_m():.1f} m slant range the drone camera "
+                    f"resolves only "
                     f"{pixels_per_module:.2f} px per QR module for {payload!r} (minimum "
                     f"{self.perception.min_pixels_per_module:.1f}): lower the altitude, widen "
                     f"the plate, or raise the resolution"
                 )
+        if not 0.05 <= self.drone.camera_depression_rad <= math.pi / 2.0:
+            problems.append(
+                "drone.camera_depression_rad must lie between 0.05 rad and pi/2"
+            )
+        # The lidar, not the camera, is what fills the occupancy grid, and it
+        # looks straight down - so coverage is limited by its cone, not by the
+        # camera swath.
+        lidar_radius = self.drone.scan_altitude_m  # 45 deg outer ray
+        if self.drone.lane_spacing_m >= 2.0 * lidar_radius:
+            problems.append(
+                f"drone.lane_spacing_m ({self.drone.lane_spacing_m:.2f} m) exceeds the "
+                f"downward lidar's {2.0 * lidar_radius:.2f} m ground diameter at "
+                f"{self.drone.scan_altitude_m:.1f} m: the occupancy grid would have gaps"
+            )
 
         if self.planner.planning_resolution_m > self.planner.rover_radius_m:
             problems.append(

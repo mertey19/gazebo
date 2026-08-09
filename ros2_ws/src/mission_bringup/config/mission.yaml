@@ -26,6 +26,9 @@ mission:
   # the plate size this fixes the code's physical size, which is what the
   # detector's corners actually bound. Matched by scripts/generate_qr_textures.py.
   qr_quiet_zone_modules: 4
+  # Height of a station's plate centre above ground (pedestal + half the cube).
+  # The slant range every resolution figure depends on is measured to this.
+  station_plate_centre_height_m: 0.65
   mission_timeout_s: 600.0
   area_min_xy: [-11.0, -11.0]
   area_max_xy: [11.0, 11.0]
@@ -41,13 +44,14 @@ frames:
   rover_lidar_frame: "rover/lidar_link"
 
 drone:
-  # 6.0 m keeps ~5.9 px per QR module with the camera below, comfortably above
-  # the 3.0 px/module decoding floor. mission_core validates this at startup.
-  scan_altitude_m: 6.0
+  # With the 30 degree camera below, 4.0 m puts a station plate at a 6.7 m
+  # slant range: ~4.6 px per QR module, above the 3.0 floor. Validated at
+  # startup, along with the lidar's ground coverage versus the lane spacing.
+  scan_altitude_m: 4.0
   takeoff_speed_mps: 1.2
   scan_speed_mps: 1.6
-  # Must stay below the camera ground footprint (6.93 m at 6.0 m altitude) or
-  # the lawnmower scan leaves unobserved strips.
+  # The occupancy grid comes from the *lidar*, which looks straight down and
+  # reaches a 4.0 m ground radius at this altitude, so 5.0 m lanes overlap.
   lane_spacing_m: 5.0
   scan_margin_m: 2.0
   altitude_tolerance_m: 0.25
@@ -57,6 +61,14 @@ drone:
   # ends up complete rather than containing only what was strictly needed.
   finish_scan_after_target_found: true
   control_rate_hz: 30.0
+  # How far below horizontal the drone camera points (pi/2 would be straight
+  # down). Looking ahead at 30 degrees sees a station's vertical faces almost
+  # head-on rather than foreshortening its top plate.
+  camera_depression_rad: 0.5235988
+  # Escort geometry: the drone holds station behind the rover by
+  # altitude / tan(depression) so the rover sits mid-frame.
+  follow_distance_scale: 1.0
+  follow_speed_mps: 2.2
   camera:
     width: 1280
     height: 960

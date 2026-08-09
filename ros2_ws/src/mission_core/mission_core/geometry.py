@@ -203,6 +203,29 @@ def optical_from_body_rotation(
     return np.column_stack((right, down, forward))
 
 
+def optical_from_depression(depression_rad: float) -> np.ndarray:
+    """``R_body_optical`` for a camera pitched ``depression_rad`` below horizontal.
+
+    ``0`` looks straight ahead, ``pi/2`` straight down.  Image-right is always
+    the vehicle's right (-Y body); image-down follows from the viewing
+    direction, so the horizon stays level in the picture at every pitch.
+
+    A depressed camera sees a station's *side* faces nearly head-on instead of
+    foreshortening its top plate, which is why it can read a QR code from
+    further away than a nadir camera at the same altitude - but it looks at
+    ground that is ahead of the vehicle rather than beneath it, and both the
+    coverage geometry and the decoding range have to be recomputed from the
+    slant range.
+    """
+    if not 0.0 <= float(depression_rad) <= math.pi / 2.0 + 1e-9:
+        raise ValueError("camera depression must lie in [0, pi/2]")
+    theta = float(depression_rad)
+    forward = np.array([math.cos(theta), 0.0, -math.sin(theta)])
+    right = np.array([0.0, -1.0, 0.0])
+    down = np.cross(forward, right)
+    return np.column_stack((right, down, forward))
+
+
 #: Optical frame of a nadir (straight-down) camera relative to ``base_link``.
 #: Image-right is the vehicle's right (-Y body), image-down is vehicle-backward
 #: (-X body) so that vehicle-forward appears "up" in the picture.
