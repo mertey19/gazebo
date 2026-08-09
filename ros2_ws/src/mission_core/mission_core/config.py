@@ -64,7 +64,13 @@ class MissionConfigSection:
     #: property of the target hardware (pedestal + half the cube), and what
     #: the slant range to a station is measured against.
     station_plate_centre_height_m: float = 0.65
-    mission_timeout_s: float = 600.0
+    #: Visit every known payload in one run rather than only ``target_qr``.
+    #: The order is decided at run time from the *discovered* positions, not
+    #: configured - a fixed order would be a position prior in disguise.
+    visit_all_targets: bool = True
+    #: Drive back to where the rover started once the tour is complete.
+    return_home: bool = True
+    mission_timeout_s: float = 1800.0
     #: Where the mission area begins and ends, in the ``map`` frame.
     area_min_xy: List[float] = field(default_factory=lambda: [-11.0, -11.0])
     area_max_xy: List[float] = field(default_factory=lambda: [11.0, 11.0])

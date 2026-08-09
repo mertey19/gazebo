@@ -29,6 +29,15 @@ from sim_harness import OrientedBox, Station, SyntheticWorld
 pytestmark = pytest.mark.integration
 
 
+def single_target_config() -> MissionConfig:
+    """One station, no drive home - the original single-leg mission."""
+    config = MissionConfig()
+    return replace(
+        config,
+        mission=replace(config.mission, visit_all_targets=False, return_home=False),
+    )
+
+
 def run_mission(world=None, target="TARGET_2", config=None, **kwargs):
     runner = OfflineMissionRunner(
         world if world is not None else default_world(),
@@ -41,8 +50,14 @@ def run_mission(world=None, target="TARGET_2", config=None, **kwargs):
 
 @pytest.fixture(scope="module")
 def nominal_run():
-    """One full successful mission, shared by the assertions below."""
+    """One full successful tour: all three stations, then home."""
     return run_mission(target="TARGET_2")
+
+
+@pytest.fixture(scope="module")
+def single_leg_run():
+    """The single-station mission, still supported and still exercised."""
+    return run_mission(target="TARGET_2", config=single_target_config())
 
 
 # ---------------------------------------------------------------------------
@@ -63,15 +78,72 @@ def test_every_mandatory_validation_check_passes(nominal_run) -> None:
     assert trace.report is not None
     assert trace.report.passed, trace.report.render()
     names = {c.name for c in trace.report.checks}
-    # The checks that make the result meaningful must all be present.
-    assert {
-        "requested_qr_discovered",
-        "path_generated",
-        "path_avoids_obstacles",
-        "path_starts_at_rover",
-        "rover_reached_goal",
-        "rover_qr_verification",
-    } <= names
+
+    # Every leg contributes its own copy of the per-station checks, prefixed
+    # with the payload, so a failure names the station it happened at.
+    for payload in ("TARGET_1", "TARGET_2", "TARGET_3"):
+        assert {
+            f"{payload}:requested_qr_discovered",
+            f"{payload}:path_generated",
+            f"{payload}:path_avoids_obstacles",
+            f"{payload}:rover_reached_goal",
+            f"{payload}:rover_qr_verification",
+        } <= names, f"missing per-leg checks for {payload}"
+    assert {"all_stations_verified", "returned_home"} <= names
+
+
+def test_single_leg_mission_still_works(single_leg_run) -> None:
+    """The one-station mode is still a supported configuration."""
+    _, trace = single_leg_run
+    assert trace.state is MissionState.MISSION_SUCCESS
+    assert trace.verified_qr == "TARGET_2"
+    assert trace.report is not None and trace.report.passed
+    # Checks carry their station's name even when there is only one leg, so a
+    # report always says *where* something passed or failed.
+    names = {c.name for c in trace.report.checks}
+    assert {"TARGET_2:rover_qr_verification", "TARGET_2:path_avoids_obstacles"} <= names
+    # ...and no drive home was asked for, so none is claimed.
+    assert "returned_home" not in names
+
+
+def test_tour_visits_every_station_then_goes_home(nominal_run) -> None:
+    """All three stations, each verified by the rover, then back to the start."""
+    runner, trace = nominal_run
+    orchestrator = runner.orchestrator
+
+    assert sorted(orchestrator.verified_qrs) == ["TARGET_1", "TARGET_2", "TARGET_3"]
+    assert orchestrator.verified_qrs == orchestrator.tour, (
+        "stations were verified out of the planned order"
+    )
+    assert len(orchestrator.leg_reports) == 3
+
+    home = orchestrator.home_xy
+    final = np.asarray(trace.rover_track[-1][:2])
+    assert home is not None
+    distance = float(np.linalg.norm(final - home))
+    assert distance <= MissionConfig().rover.goal_tolerance_m, (
+        f"rover finished {distance:.2f} m from where it started"
+    )
+
+
+def test_tour_order_follows_the_discovered_positions(nominal_run) -> None:
+    """The itinerary is derived from perception, not configured.
+
+    Each successive station must be the nearest remaining one to the previous
+    stop, using the positions the *drone discovered* - which is what makes the
+    order a consequence of the mission rather than a hard-coded route.
+    """
+    runner, _ = nominal_run
+    orchestrator = runner.orchestrator
+    cursor = np.asarray(orchestrator.home_xy, dtype=float)
+    remaining = {
+        payload: orchestrator.world_model.get_target(payload).position[:2]
+        for payload in orchestrator.tour
+    }
+    for payload in orchestrator.tour:
+        nearest = min(remaining, key=lambda q: float(np.linalg.norm(remaining[q] - cursor)))
+        assert payload == nearest, f"expected {nearest} next, tour says {payload}"
+        cursor = remaining.pop(payload)
 
 
 def test_the_expected_log_sequence_appears(nominal_run) -> None:
@@ -81,13 +153,16 @@ def test_the_expected_log_sequence_appears(nominal_run) -> None:
         "[MISSION] Requested QR: TARGET_2",
         "[DRONE] Taking off",
         "[QR] TARGET_2 detected",
-        "[MISSION] Requested target TARGET_2 found",
-        "[PLANNER] Planning rover path",
+        "[MISSION] TARGET_2 found at",
+        "[MISSION] Tour order:",
         "[MISSION] Path sent to rover",
-        "[ROVER] Navigation started",
         "[ROVER] Goal reached",
+        "[QR] Rover detected TARGET_1",
         "[QR] Rover detected TARGET_2",
-        "[MISSION] QR verification successful",
+        "[QR] Rover detected TARGET_3",
+        "[ROVER] Driving home",
+        "[ROVER] Home",
+        "[MISSION] All stations verified in order:",
         "[MISSION] SUCCESS",
     ):
         assert expected in joined, f"missing log line: {expected!r}\n---\n{joined}"
@@ -111,7 +186,11 @@ def test_perception_positions_are_accurate(nominal_run) -> None:
         record = trace.world_model.get_target(payload)
         assert record is not None, f"{payload} was never discovered"
         errors[payload] = float(np.linalg.norm(record.position[:2] - expected))
-    assert max(errors.values()) < 0.30, f"position errors: {errors}"
+    # A depressed camera mostly reads a station's *side* plate, whose centre
+    # is half a cube (0.4 m) from the cube centre, so the tolerance is the
+    # plate offset plus a margin rather than the few centimetres a nadir
+    # camera achieved against the top plate.
+    assert max(errors.values()) < 0.60, f"position errors: {errors}"
 
 
 def test_obstacles_are_mapped_from_lidar(nominal_run) -> None:
@@ -182,7 +261,8 @@ def test_no_camera_frame_was_unusable(nominal_run) -> None:
 
 @pytest.mark.parametrize("target", ["TARGET_1", "TARGET_3"])
 def test_other_targets_also_complete(target: str) -> None:
-    runner, trace = run_mission(target=target)
+    """Single-leg mode against each of the other two payloads."""
+    runner, trace = run_mission(target=target, config=single_target_config())
     assert trace.state is MissionState.MISSION_SUCCESS, (
         f"{target}: {trace.state.value} ({trace.failure_reason})"
     )

@@ -29,7 +29,11 @@ mission:
   # Height of a station's plate centre above ground (pedestal + half the cube).
   # The slant range every resolution figure depends on is measured to this.
   station_plate_centre_height_m: 0.65
-  mission_timeout_s: 600.0
+  # Visit all three stations in one run, in an order chosen from where they
+  # were actually found, then drive back to the rover's starting point.
+  visit_all_targets: true
+  return_home: true
+  mission_timeout_s: 1800.0
   area_min_xy: [-11.0, -11.0]
   area_max_xy: [11.0, 11.0]
 
@@ -93,6 +97,7 @@ rover:
   max_cross_track_error_m: 1.5
   cross_track_grace_s: 3.0
   approach_slowdown_m: 1.0
+  # Per leg, not for the whole tour.
   navigation_timeout_s: 240.0
   control_rate_hz: 20.0
   # Must stay below the clearance the planner guarantees as seen from the

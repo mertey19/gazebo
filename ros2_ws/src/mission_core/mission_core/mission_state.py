@@ -26,6 +26,8 @@ class MissionState(str, Enum):
     SENDING_PATH = "SENDING_PATH"
     ROVER_NAVIGATING = "ROVER_NAVIGATING"
     VERIFYING_TARGET = "VERIFYING_TARGET"
+    #: Driving back to the rover's starting point after the last station.
+    RETURNING_HOME = "RETURNING_HOME"
     MISSION_SUCCESS = "MISSION_SUCCESS"
     MISSION_FAILED = "MISSION_FAILED"
 
@@ -50,16 +52,22 @@ _NOMINAL_TRANSITIONS: Dict[MissionState, FrozenSet[MissionState]] = {
     MissionState.TARGET_FOUND: frozenset({MissionState.PLANNING}),
     MissionState.PLANNING: frozenset({MissionState.PATH_READY}),
     MissionState.PATH_READY: frozenset({MissionState.SENDING_PATH}),
-    MissionState.SENDING_PATH: frozenset({MissionState.ROVER_NAVIGATING}),
+    # The last leg of a tour drives home instead of to another station.
+    MissionState.SENDING_PATH: frozenset(
+        {MissionState.ROVER_NAVIGATING, MissionState.RETURNING_HOME}
+    ),
     # A bounded recovery may stop the rover and plan again from its live pose.
     MissionState.ROVER_NAVIGATING: frozenset(
         {MissionState.VERIFYING_TARGET, MissionState.PLANNING}
     ),
     # Verification may bounce back to planning if the rover reached a station
     # whose code does not match and another candidate is still available.
+    # PLANNING again is the normal path through a multi-station tour: verify
+    # one, plan the next. It is also how a mismatch retries another candidate.
     MissionState.VERIFYING_TARGET: frozenset(
         {MissionState.MISSION_SUCCESS, MissionState.PLANNING}
     ),
+    MissionState.RETURNING_HOME: frozenset({MissionState.MISSION_SUCCESS}),
     MissionState.MISSION_SUCCESS: frozenset(),
     MissionState.MISSION_FAILED: frozenset(),
 }

@@ -325,8 +325,12 @@ class OfflineMissionRunner:
                         self._last_map_publish_t = now
                         self._refresh_occupancy()
 
-            # ---- rover: follow the path once one has been received
-            if state is MissionState.ROVER_NAVIGATING and self.follower.has_path:
+            # ---- rover: follow the path once one has been received. The way
+            # home is driven exactly like any other leg.
+            if (
+                state in (MissionState.ROVER_NAVIGATING, MissionState.RETURNING_HOME)
+                and self.follower.has_path
+            ):
                 status = self.follower.compute(self.rover.pose, self.dt)
                 if status.state is FollowerState.GOAL_REACHED:
                     rover_goal_reached = True
@@ -360,6 +364,17 @@ class OfflineMissionRunner:
             )
             for message in outputs.messages:
                 self._log(message)
+
+            if outputs.command is MissionCommand.PREPARE_REPLAN:
+                # Mirrors mission_manager_node: a new leg starts from a clean
+                # slate. Without this the previous station's verified payload
+                # is still latched and instantly "verifies" the next one.
+                verified_qr = None
+                rover_goal_reached = False
+                rover_tracking_failed = False
+                path_published = False
+                self._verification_hits.clear()
+                self.follower.reset()
 
             if outputs.command is MissionCommand.PUBLISH_PATH and outputs.path is not None:
                 # Stand-in for the /mission/rover_path publish + rover subscribe.

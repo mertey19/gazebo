@@ -49,6 +49,22 @@ def confirmed_world_model(payload: str = "TARGET_2", xy=(7.0, -5.0)) -> WorldMod
     return model
 
 
+def single_target_config(**overrides) -> MissionConfig:
+    """A config that visits only the requested payload and does not go home.
+
+    The tour is the shipped default, but these tests are about one leg: the
+    failure taxonomy, the recovery budgets and the verification rules. Pinning
+    the mode here keeps them focused and keeps the tour's own tests honest.
+    """
+    from dataclasses import replace as dc_replace
+
+    config = MissionConfig(**overrides)
+    return dc_replace(
+        config,
+        mission=dc_replace(config.mission, visit_all_targets=False, return_home=False),
+    )
+
+
 def run_to_state(orchestrator: MissionOrchestrator, target: MissionState, **input_kwargs):
     """Tick the orchestrator until it reaches ``target`` or goes terminal.
 
@@ -82,7 +98,7 @@ def run_to_state(orchestrator: MissionOrchestrator, target: MissionState, **inpu
 
 def test_requesting_an_unconfigured_payload_fails_immediately() -> None:
     orchestrator = MissionOrchestrator(
-        MissionConfig(), confirmed_world_model(), requested_qr="TARGET_9"
+        single_target_config(), confirmed_world_model(), requested_qr="TARGET_9"
     )
     orchestrator.update(MissionInputs(now=0.0, drone_ready=True))
     assert orchestrator.state is MissionState.MISSION_FAILED
@@ -93,7 +109,8 @@ def test_requesting_an_unconfigured_payload_fails_immediately() -> None:
 def test_never_decoded_payload_fails_after_the_scan_completes() -> None:
     """A full sweep that never saw the code must fail, not wait forever."""
     model = confirmed_world_model("TARGET_1", (6.0, 6.0))
-    orchestrator = MissionOrchestrator(MissionConfig(), model, requested_qr="TARGET_2")
+    orchestrator = MissionOrchestrator(
+        single_target_config(), model, requested_qr="TARGET_2")
     run_to_state(orchestrator, MissionState.MISSION_FAILED)
 
     assert orchestrator.state is MissionState.MISSION_FAILED
@@ -114,7 +131,8 @@ def test_tentative_target_is_not_good_enough_to_plan_against() -> None:
             source="drone_camera",
         )
     )
-    orchestrator = MissionOrchestrator(MissionConfig(), model, requested_qr="TARGET_2")
+    orchestrator = MissionOrchestrator(
+        single_target_config(), model, requested_qr="TARGET_2")
     run_to_state(orchestrator, MissionState.MISSION_FAILED)
 
     assert orchestrator.machine.failure_reason is FailureReason.TARGET_NOT_DISCOVERED
@@ -137,7 +155,8 @@ def test_duplicate_qr_aborts_rather_than_guessing() -> None:
         )
     assert model.get_target("TARGET_2").status is TargetStatus.AMBIGUOUS
 
-    orchestrator = MissionOrchestrator(MissionConfig(), model, requested_qr="TARGET_2")
+    orchestrator = MissionOrchestrator(
+        single_target_config(), model, requested_qr="TARGET_2")
     run_to_state(orchestrator, MissionState.MISSION_FAILED)
     assert orchestrator.machine.failure_reason is FailureReason.DUPLICATE_QR
 
@@ -158,7 +177,8 @@ def test_no_occupancy_grid_means_no_plan() -> None:
             )
         )
     assert model.has_confirmed("TARGET_2") and model.occupancy is None
-    orchestrator = MissionOrchestrator(MissionConfig(), model, requested_qr="TARGET_2")
+    orchestrator = MissionOrchestrator(
+        single_target_config(), model, requested_qr="TARGET_2")
     run_to_state(orchestrator, MissionState.MISSION_FAILED)
     assert orchestrator.machine.failure_reason is FailureReason.NO_VALID_PATH
 
@@ -177,21 +197,22 @@ def test_unreachable_target_fails_with_no_valid_path() -> None:
         grid.mark_box(centre, size)
     model.set_occupancy(grid)
 
-    orchestrator = MissionOrchestrator(MissionConfig(), model, requested_qr="TARGET_2")
+    orchestrator = MissionOrchestrator(
+        single_target_config(), model, requested_qr="TARGET_2")
     run_to_state(orchestrator, MissionState.MISSION_FAILED)
     assert orchestrator.machine.failure_reason is FailureReason.NO_VALID_PATH
 
 
 def test_missing_rover_odometry_fails_with_localization_unavailable() -> None:
     orchestrator = MissionOrchestrator(
-        MissionConfig(), confirmed_world_model(), requested_qr="TARGET_2"
+        single_target_config(), confirmed_world_model(), requested_qr="TARGET_2"
     )
     run_to_state(orchestrator, MissionState.MISSION_FAILED, rover_pose=None)
     assert orchestrator.machine.failure_reason is FailureReason.LOCALIZATION_UNAVAILABLE
 
 
 def test_navigation_timeout_is_enforced() -> None:
-    config = MissionConfig()
+    config = single_target_config()
     orchestrator = MissionOrchestrator(
         config, confirmed_world_model(), requested_qr="TARGET_2"
     )
@@ -213,7 +234,7 @@ def test_navigation_timeout_is_enforced() -> None:
 
 
 def test_rover_tracking_failure_aborts_the_mission() -> None:
-    config = MissionConfig()
+    config = single_target_config()
     config = replace(config, rover=replace(config.rover, max_replans=0))
     orchestrator = MissionOrchestrator(
         config, confirmed_world_model(), requested_qr="TARGET_2"
@@ -236,7 +257,7 @@ def test_rover_tracking_failure_aborts_the_mission() -> None:
 
 
 def test_tracking_failure_replans_once_from_the_live_rover_pose() -> None:
-    config = MissionConfig()
+    config = single_target_config()
     orchestrator = MissionOrchestrator(
         config, confirmed_world_model(), requested_qr="TARGET_2"
     )
@@ -307,7 +328,7 @@ def test_tracking_failure_replans_once_from_the_live_rover_pose() -> None:
 
 def _reach_verification(requested="TARGET_2"):
     orchestrator = MissionOrchestrator(
-        MissionConfig(), confirmed_world_model(), requested_qr=requested
+        single_target_config(), confirmed_world_model(), requested_qr=requested
     )
     run_to_state(orchestrator, MissionState.ROVER_NAVIGATING)
     base = dict(
@@ -492,7 +513,8 @@ def test_validation_uses_the_map_the_path_was_planned_against() -> None:
     handled live by the replan path instead.
     """
     model = confirmed_world_model()
-    orchestrator = MissionOrchestrator(MissionConfig(), model, requested_qr="TARGET_2")
+    orchestrator = MissionOrchestrator(
+        single_target_config(), model, requested_qr="TARGET_2")
     run_to_state(orchestrator, MissionState.ROVER_NAVIGATING)
     assert orchestrator.path is not None
     assert orchestrator.planning_occupancy is not None
