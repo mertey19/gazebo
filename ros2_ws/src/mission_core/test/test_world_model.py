@@ -8,10 +8,10 @@ import pytest
 from mission_core.occupancy import (
     FREE,
     OCCUPIED,
+    UNKNOWN,
     GridMetadata,
     OccupancyGrid,
     OccupancyMapper,
-    planar_scan_hit_points,
 )
 from mission_core.world_model import TargetObservation, TargetStatus, WorldModel
 
@@ -28,31 +28,20 @@ def observation(qr_id: str, xy, confidence: float = 0.8, stamp: float = 0.0):
     )
 
 
-def test_planar_scan_converts_only_real_hits_to_points() -> None:
-    points = planar_scan_hit_points(
-        [1.0, np.inf, 3.0, 4.0],
-        angle_min=0.0,
-        angle_increment=np.pi / 2.0,
-        range_min=0.2,
-        range_max=4.0,
-    )
-    assert points.shape == (2, 3)
-    assert np.allclose(points[0], [1.0, 0.0, 0.0])
-    assert np.allclose(points[1], [-3.0, 0.0, 0.0], atol=1e-12)
-
-
-def test_runtime_lidar_hits_override_old_ground_evidence() -> None:
+def test_runtime_camera_hits_override_old_ground_evidence() -> None:
     mapper = OccupancyMapper(
         GridMetadata(0.2, 20, 20, -2.0, -2.0),
         min_hits=2,
         hit_ratio_threshold=0.35,
     )
-    # The drone previously classified this cell as ground many times.
-    mapper.integrate(np.repeat([[0.1, 0.1, 0.0]], 20, axis=0))
+    # The drone previously saw floor in this cell many times.
+    mapper.integrate_ground_observation(
+        np.zeros((0, 3)), np.repeat([[0.1, 0.1, 0.0]], 20, axis=0)
+    )
     assert mapper.build().value_at((0.1, 0.1)) == FREE
 
-    # Two consistent rover-height endpoints mean a newly appeared obstacle;
-    # historical ground returns must not dilute that direct evidence.
+    # Two consistent contacts from the rover's own camera mean a newly
+    # appeared obstacle; historical free evidence must not dilute that.
     mapper.integrate_runtime_obstacle_hits(np.array([[0.1, 0.1, 0.3]]))
     assert mapper.build().value_at((0.1, 0.1)) == FREE
     mapper.integrate_runtime_obstacle_hits(np.array([[0.1, 0.1, 0.3]]))
@@ -174,28 +163,44 @@ def test_replace_targets_overwrites_wholesale() -> None:
 # Occupancy mapping
 # ---------------------------------------------------------------------------
 
-def test_mapper_separates_ground_returns_from_obstacles() -> None:
+def test_mapper_separates_free_floor_from_obstacle_contacts() -> None:
     metadata = GridMetadata(0.2, 60, 60, -6.0, -6.0)
-    mapper = OccupancyMapper(metadata, obstacle_min_height_m=0.25, min_hits=2)
+    mapper = OccupancyMapper(metadata, min_hits=2)
 
-    ground = np.array([[x, y, 0.0] for x in np.arange(-5, 5, 0.2) for y in (-1.0, 0.0)])
-    obstacle = np.array([[1.0, 2.0, 1.2]] * 4 + [[1.1, 2.05, 1.1]] * 4)
-    mapper.integrate(ground)
-    mapper.integrate(obstacle)
+    floor = np.array([[x, y, 0.0] for x in np.arange(-5, 5, 0.2) for y in (-1.0, 0.0)])
+    contacts = np.array([[1.0, 2.0, 1.2]] * 4 + [[1.1, 2.05, 1.1]] * 4)
+    for _ in range(4):
+        mapper.integrate_ground_observation(contacts, floor)
     grid = mapper.build()
 
     assert grid.value_at((1.0, 2.0)) == OCCUPIED
     assert grid.value_at((0.0, 0.0)) == FREE
     # Never observed: must stay unknown rather than default to free.
-    assert grid.value_at((-5.5, 5.5)) == -1
+    assert grid.value_at((-5.5, 5.5)) == UNKNOWN
+    # z carries the height measured for the obstacle, not the point's own.
     assert mapper.height_map.max() == pytest.approx(1.2, abs=1e-5)
 
 
-def test_mapper_ignores_a_single_spurious_return() -> None:
-    """One stray high point must not become an obstacle."""
+def test_a_contact_shadows_free_evidence_in_its_own_cell() -> None:
+    """At the foot of a wall, floor and wall are less than one cell apart.
+
+    The floor samples outnumber the contacts by an order of magnitude, so
+    counting both in the same cell would wash out every boundary the camera
+    measured.
+    """
+    mapper = OccupancyMapper(GridMetadata(0.2, 20, 20, -2.0, -2.0), min_hits=1)
+    contacts = np.array([[0.05, 0.05, 1.0]])
+    floor = np.repeat([[0.11, 0.11, 0.0]], 30, axis=0)  # same cell as the contact
+    mapper.integrate_ground_observation(contacts, floor)
+    assert mapper.build().value_at((0.05, 0.05)) == OCCUPIED
+
+
+def test_mapper_ignores_a_single_spurious_contact() -> None:
+    """One stray contact must not become an obstacle."""
     mapper = OccupancyMapper(GridMetadata(0.2, 40, 40, -4.0, -4.0), min_hits=2)
-    mapper.integrate(np.array([[0.0, 0.0, 0.0]] * 10))
-    mapper.integrate(np.array([[0.0, 0.0, 2.0]]))
+    for _ in range(10):
+        mapper.integrate_ground_observation(np.zeros((0, 3)), np.array([[0.0, 0.0, 0.0]]))
+    mapper.integrate_ground_observation(np.array([[0.0, 0.0, 2.0]]), np.zeros((0, 3)))
     assert mapper.build().value_at((0.0, 0.0)) == FREE
 
 

@@ -42,20 +42,19 @@ frames:
   odom_frame: "odom"
   drone_base_frame: "drone/base_link"
   drone_camera_optical_frame: "drone/camera_optical_frame"
-  drone_lidar_frame: "drone/lidar_link"
   rover_base_frame: "rover/base_link"
   rover_camera_optical_frame: "rover/camera_optical_frame"
-  rover_lidar_frame: "rover/lidar_link"
 
 drone:
   # With the 30 degree camera below, 4.0 m puts a station plate at a 6.7 m
   # slant range: ~4.6 px per QR module, above the 3.0 floor. Validated at
-  # startup, along with the lidar's ground coverage versus the lane spacing.
+  # startup, along with the mapped ground swath versus the lane spacing.
   scan_altitude_m: 4.0
   takeoff_speed_mps: 1.2
   scan_speed_mps: 1.6
-  # The occupancy grid comes from the *lidar*, which looks straight down and
-  # reaches a 4.0 m ground radius at this altitude, so 5.0 m lanes overlap.
+  # The occupancy grid comes from the same camera. Its mapped strip is
+  # narrowest at the near edge (5.7 m at this altitude), so 5.0 m lanes still
+  # overlap; MissionConfig.validate() recomputes that at every startup.
   lane_spacing_m: 5.0
   scan_margin_m: 2.0
   altitude_tolerance_m: 0.25
@@ -106,10 +105,10 @@ rover:
   navigation_timeout_s: 240.0
   control_rate_hz: 20.0
   # Must stay below the clearance the planner guarantees as seen from the
-  # lidar (rover_radius + safety_margin - lidar offset); otherwise the
+  # camera (rover_radius + safety_margin - camera offset); otherwise the
   # emergency stop fires on the rover's own correctly planned path.
   obstacle_stop_distance_m: 0.30
-  safety_lidar_forward_offset_m: 0.24
+  safety_camera_forward_offset_m: 0.22
   obstacle_stop_half_angle_rad: 0.35
   # If a newly appeared obstacle holds the safety stop this long, refresh the
   # route from the rover's live pose instead of waiting for navigation timeout.
@@ -131,22 +130,53 @@ perception:
   min_pixels_per_module: 3.0
   max_consecutive_bad_frames: 30
 
+# Monocular obstacle mapping. No vehicle carries a ranging sensor, so this
+# section is the entire sensor model behind the occupancy grid: how a frame is
+# split into floor and not-floor, and how far a single camera may be trusted.
+vision:
+  ground_z_m: 0.0
+  # Rays near the top of a depressed frame graze the floor and run to the
+  # horizon; past this horizontal range one pixel of error is worth metres.
+  drone_max_range_m: 10.0
+  # The rover only has to see far enough to stop.
+  rover_max_range_m: 6.0
+  # Measured silhouette heights outside this band are not obstacles: below it
+  # is floor texture, above it is a mis-segmented sky or horizon pixel.
+  min_obstacle_height_m: 0.25
+  max_obstacle_height_m: 8.0
+  column_stride_px: 8
+  free_stride_px: 16
+  # Robust deviations of Lab chroma from the floor's own colour. Chroma rather
+  # than brightness, so shadows - which keep the floor's hue - are not walls.
+  chroma_sigma: 3.5
+  # One-sided lightness test for achromatic obstacles such as a white QR
+  # plate. Shadows are darker than the floor, so they can never trip it.
+  bright_luma_margin: 40.0
+  min_blob_area_px: 200.0
+  segmentation_downsample: 2
+  # A frame with more non-floor than this does not get to say what the floor
+  # looks like. Until some frame has, nothing is mapped at all: with no
+  # reference, a view half full of obstacle could define either surface as the
+  # background. Afterwards a frame like that is still used - a camera filled by
+  # a wall is a close wall, which is exactly what must not be dropped.
+  max_non_ground_fraction: 0.35
+  # The drone escorts the rover from behind and sees it clearly. Without this
+  # the rover would be mapped as an obstacle standing on its own route.
+  self_filter_radius_m: 1.0
+
 world_model:
   association_radius_m: 1.5
   min_observations: 3
   min_confidence: 0.35
   grid_resolution_m: 0.20
-  # Lidar returns above this height are obstacles; below it they are ground.
-  obstacle_min_height_m: 0.25
-  obstacle_max_height_m: 8.0
   mapper_min_hits: 2
   mapper_hit_ratio: 0.35
   publish_rate_hz: 2.0
 
 planner:
   rover_radius_m: 0.30
-  # Sized so pure pursuit can cut a corner by ~0.12 m and the safety lidar
-  # still reads more than rover.obstacle_stop_distance_m on a clean path.
+  # Sized so pure pursuit can cut a corner by ~0.12 m and the rover camera
+  # still measures more than rover.obstacle_stop_distance_m on a clean path.
   obstacle_safety_margin_m: 0.40
   planning_resolution_m: 0.20
   # Fail closed: the rover stays inside the area the drone actually observed.

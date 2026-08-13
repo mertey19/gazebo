@@ -1,9 +1,13 @@
-"""2D occupancy representation and the mapper that builds it from lidar points.
+"""2D occupancy representation and the mapper that builds it from camera evidence.
 
 The grid is byte-for-byte compatible with ``nav_msgs/msg/OccupancyGrid``:
 ``-1`` unknown, ``0`` free, ``100`` occupied, row-major with row ``0`` at the
 grid origin.  Keeping the same convention here means the ROS node never has to
 re-interpret the data, only copy it.
+
+The evidence itself comes from :mod:`mission_core.vision_mapping`, which
+recovers obstacle bases and free floor from single RGB frames.  This module is
+sensor-agnostic: it consumes ground-plane points, not rays or ranges.
 """
 
 from __future__ import annotations
@@ -17,35 +21,6 @@ import numpy as np
 UNKNOWN = -1
 FREE = 0
 OCCUPIED = 100
-
-
-def planar_scan_hit_points(
-    ranges: Sequence[float],
-    *,
-    angle_min: float,
-    angle_increment: float,
-    range_min: float,
-    range_max: float,
-) -> np.ndarray:
-    """Convert valid 2D lidar hits into sensor-frame ``(x, y, 0)`` points.
-
-    Infinite and maximum-range readings mean "no return" and are deliberately
-    excluded; treating them as endpoints would create a ring of fake walls.
-    """
-    values = np.asarray(ranges, dtype=float)
-    if values.size == 0:
-        return np.empty((0, 3), dtype=float)
-    angles = float(angle_min) + np.arange(values.size) * float(angle_increment)
-    valid = (
-        np.isfinite(values)
-        & (values >= float(range_min))
-        & (values < float(range_max))
-    )
-    values = values[valid]
-    angles = angles[valid]
-    return np.column_stack(
-        (values * np.cos(angles), values * np.sin(angles), np.zeros(values.size))
-    )
 
 
 @dataclass(frozen=True)
@@ -315,21 +290,25 @@ class OccupancyGrid:
 
 
 class OccupancyMapper:
-    """Builds an :class:`OccupancyGrid` from lidar returns in the ``map`` frame.
+    """Builds an :class:`OccupancyGrid` from monocular ground evidence.
 
-    Each column of the world is classified by the highest return seen in it:
-    a return above ``obstacle_min_height_m`` marks the cell occupied, a return
-    below it marks the cell free.  Counting hits and misses separately (rather
-    than overwriting) keeps a single spurious return from carving a hole in an
-    obstacle, and is the natural place to later add decay for moving objects.
+    Each frame contributes two kinds of ``map``-frame point: the floor
+    positions where an obstacle was seen to *stand* (hits, carrying the height
+    measured for that obstacle), and the floor positions that were seen to be
+    empty (misses).  Counting the two separately rather than overwriting keeps
+    one mis-segmented frame from carving a hole in an obstacle, and makes a
+    contact that only ever appears from a single viewpoint fail the ratio test.
+
+    Cells that were never projected into stay ``UNKNOWN``.  That matters more
+    with a camera than it did with a lidar: what a camera cannot see behind an
+    obstacle is exactly the obstacle's own interior, and ``UNKNOWN`` is what
+    stops the planner routing through it.
     """
 
     def __init__(
         self,
         metadata: GridMetadata,
         *,
-        obstacle_min_height_m: float = 0.25,
-        obstacle_max_height_m: float = 10.0,
         min_hits: int = 2,
         hit_ratio_threshold: float = 0.35,
     ) -> None:
@@ -338,79 +317,89 @@ class OccupancyMapper:
         if not 0.0 < hit_ratio_threshold <= 1.0:
             raise ValueError("hit_ratio_threshold must lie in (0, 1]")
         self.metadata = metadata
-        self.obstacle_min_height_m = float(obstacle_min_height_m)
-        self.obstacle_max_height_m = float(obstacle_max_height_m)
         self.min_hits = int(min_hits)
         self.hit_ratio_threshold = float(hit_ratio_threshold)
         self._hits = np.zeros((metadata.height, metadata.width), dtype=np.int32)
         self._misses = np.zeros((metadata.height, metadata.width), dtype=np.int32)
-        # Local rover lidar is direct evidence that a path changed after the
-        # drone mapped it. Keep that evidence separate from historical ground
-        # misses so a new obstacle is not diluted by the old free-space ratio.
+        # The rover's own camera is direct evidence that a route changed after
+        # the drone mapped it. Keep that evidence separate from historical
+        # ground misses so a new obstacle is not diluted by the old free ratio.
         self._runtime_obstacle_hits = np.zeros(
             (metadata.height, metadata.width), dtype=np.int32
         )
         self._max_height = np.zeros((metadata.height, metadata.width), dtype=np.float32)
 
-    def integrate(self, points_map: np.ndarray) -> int:
-        """Fold a batch of ``(N, 3)`` map-frame points in; returns points used."""
-        pts = np.asarray(points_map, dtype=float)
+    def _cells(self, points: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``(rows, cols, inside_mask)`` for ``(N, 3)`` map-frame points."""
+        pts = np.atleast_2d(np.asarray(points, dtype=float))
         if pts.size == 0:
-            return 0
-        pts = np.atleast_2d(pts)
+            empty = np.zeros(0, dtype=int)
+            return empty, empty, np.zeros(0, dtype=bool)
         if pts.shape[1] != 3:
             raise ValueError(f"expected (N, 3) points, got {pts.shape}")
-        finite = np.isfinite(pts).all(axis=1)
-        pts = pts[finite]
-        if pts.size == 0:
-            return 0
-
         meta = self.metadata
-        cols = np.floor((pts[:, 0] - meta.origin_x) / meta.resolution).astype(int)
-        rows = np.floor((pts[:, 1] - meta.origin_y) / meta.resolution).astype(int)
-        inside = (rows >= 0) & (rows < meta.height) & (cols >= 0) & (cols < meta.width)
-        rows, cols, heights = rows[inside], cols[inside], pts[inside, 2]
+        finite = np.isfinite(pts).all(axis=1)
+        # Non-finite coordinates are parked outside the grid rather than left
+        # to propagate NaN through the floor division.
+        safe = np.where(finite[:, None], pts[:, :2], np.array([meta.origin_x - 1.0, 0.0]))
+        cols = np.floor((safe[:, 0] - meta.origin_x) / meta.resolution)
+        rows = np.floor((safe[:, 1] - meta.origin_y) / meta.resolution)
+        inside = (
+            finite
+            & (rows >= 0)
+            & (rows < meta.height)
+            & (cols >= 0)
+            & (cols < meta.width)
+        )
+        rows = np.where(inside, rows, 0).astype(int)
+        cols = np.where(inside, cols, 0).astype(int)
+        return rows, cols, inside
 
-        is_obstacle = (heights >= self.obstacle_min_height_m) & (
-            heights <= self.obstacle_max_height_m
-        )
-        np.add.at(self._hits, (rows[is_obstacle], cols[is_obstacle]), 1)
-        np.add.at(self._misses, (rows[~is_obstacle], cols[~is_obstacle]), 1)
-        np.maximum.at(
-            self._max_height,
-            (rows[is_obstacle], cols[is_obstacle]),
-            heights[is_obstacle].astype(np.float32),
-        )
-        return int(rows.size)
+    def integrate_ground_observation(
+        self, contacts_map: np.ndarray, free_map: np.ndarray
+    ) -> int:
+        """Fold one frame of monocular evidence in; returns the cells touched.
+
+        ``contacts_map`` is ``(N, 3)`` with the measured obstacle height in
+        ``z``; ``free_map`` is ``(M, 3)`` of floor samples.  Free evidence that
+        lands in a cell this same frame saw an obstacle base in is dropped: at
+        the foot of an obstacle the two are separated by centimetres, well
+        inside one cell, and letting the far denser floor samples vote there
+        would erase every boundary the camera just measured.
+        """
+        hit_rows, hit_cols, hit_inside = self._cells(contacts_map)
+        hit_rows, hit_cols = hit_rows[hit_inside], hit_cols[hit_inside]
+        if hit_rows.size:
+            heights = np.atleast_2d(np.asarray(contacts_map, dtype=float))[hit_inside, 2]
+            np.add.at(self._hits, (hit_rows, hit_cols), 1)
+            np.maximum.at(
+                self._max_height, (hit_rows, hit_cols), heights.astype(np.float32)
+            )
+
+        free_rows, free_cols, free_inside = self._cells(free_map)
+        free_rows, free_cols = free_rows[free_inside], free_cols[free_inside]
+        if free_rows.size:
+            occupied_now = np.zeros(self._hits.shape, dtype=bool)
+            occupied_now[hit_rows, hit_cols] = True
+            keep = ~occupied_now[free_rows, free_cols]
+            np.add.at(self._misses, (free_rows[keep], free_cols[keep]), 1)
+            return int(hit_rows.size + np.count_nonzero(keep))
+        return int(hit_rows.size)
 
     def integrate_runtime_obstacle_hits(self, points_map: np.ndarray) -> int:
-        """Add direct obstacle endpoints from a local planar lidar.
+        """Add obstacle contacts seen by a vehicle's own local camera.
 
         Two consistent hits (or the configured ``min_hits``) override earlier
         ground/free observations. Evidence is intentionally sticky; removing
         moving obstacles requires the decay model documented as future work.
         """
-        pts = np.asarray(points_map, dtype=float)
-        if pts.size == 0:
-            return 0
-        pts = np.atleast_2d(pts)
-        if pts.shape[1] != 3:
-            raise ValueError(f"expected (N, 3) points, got {pts.shape}")
-        pts = pts[np.isfinite(pts).all(axis=1)]
-        if pts.size == 0:
-            return 0
-
-        meta = self.metadata
-        cols = np.floor((pts[:, 0] - meta.origin_x) / meta.resolution).astype(int)
-        rows = np.floor((pts[:, 1] - meta.origin_y) / meta.resolution).astype(int)
-        inside = (rows >= 0) & (rows < meta.height) & (cols >= 0) & (cols < meta.width)
+        rows, cols, inside = self._cells(points_map)
         rows, cols = rows[inside], cols[inside]
+        if rows.size == 0:
+            return 0
+        heights = np.atleast_2d(np.asarray(points_map, dtype=float))[inside, 2]
         np.add.at(self._runtime_obstacle_hits, (rows, cols), 1)
-        np.maximum.at(
-            self._max_height,
-            (rows, cols),
-            pts[inside, 2].astype(np.float32),
-        )
+        np.maximum.at(self._max_height, (rows, cols), heights.astype(np.float32))
         return int(rows.size)
 
     def build(self) -> OccupancyGrid:

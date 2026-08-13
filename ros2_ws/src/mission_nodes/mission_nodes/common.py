@@ -319,7 +319,7 @@ def lookup_transform(
     * A sensor message is routinely stamped a few milliseconds ahead of the
       newest transform, which raises "extrapolation into the future". Dropping
       the data for that is far worse than using a transform 20 ms old: at rover
-      and drone speeds that is under 3 cm. One run integrated *zero* lidar
+      and drone speeds that is under 3 cm. One run integrated *zero* camera
       sweeps for exactly this reason and produced a completely empty map.
     """
     try:

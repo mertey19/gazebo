@@ -156,7 +156,6 @@ def test_camera_publishes_the_frame_the_detector_looks_up(sdf_models, model, sen
     "model,sensor,launch_key,harness_attr",
     [
         ("scout_drone", "down_camera", "DRONE_CAMERA_XYZ", "DRONE_CAMERA_MOUNT"),
-        ("scout_drone", "down_lidar", "DRONE_LIDAR_XYZ", "DRONE_LIDAR_MOUNT"),
         ("mission_rover", "front_camera", "ROVER_CAMERA_XYZ", "ROVER_CAMERA_MOUNT"),
     ],
 )
@@ -196,36 +195,19 @@ def test_launch_optical_quaternions_are_the_derived_ones(launch_constants, confi
         assert same, f"{key}: launch has {launch_quat}, geometry.py derives {derived}"
 
 
-def test_drone_lidar_is_mounted_level(sdf_models) -> None:
-    """A rotated lidar frame is an easy way to smear the whole occupancy grid.
+def test_no_vehicle_carries_a_range_sensor(sdf_models) -> None:
+    """The scenario forbids ranging sensors; the models must have none.
 
-    The design aims the lidar downwards through its vertical scan range so the
-    base_link -> lidar_link transform stays a pure translation, matching the
-    identity rotation the launch file publishes.
+    This is the check that keeps the rest of the stack honest. Every obstacle
+    position in the mission is recovered from an RGB frame and a ground-plane
+    assumption, and re-adding a lidar to an SDF is the one change that could
+    make that story quietly untrue while every other test still passed.
     """
-    lidar = find_sensor(sdf_models["scout_drone"], "down_lidar")
-    _, rpy = parse_pose(lidar.find("pose").text)
-    assert np.allclose(rpy, 0.0, atol=TOLERANCE), f"drone lidar is rotated: rpy={rpy}"
-
-    vertical = lidar.find("lidar").find("scan").find("vertical")
-    min_angle = float(vertical.find("min_angle").text)
-    max_angle = float(vertical.find("max_angle").text)
-    assert min_angle < max_angle <= 0.0, "the lidar cone must point downwards"
-    assert min_angle >= -np.pi / 2 - 1e-6
-
-
-def test_drone_lidar_cone_covers_the_lane_spacing(sdf_models, config) -> None:
-    """Consecutive lawnmower lanes must overlap in the lidar swath too."""
-    lidar = find_sensor(sdf_models["scout_drone"], "down_lidar")
-    max_angle = float(lidar.find("lidar").find("scan").find("vertical").find("max_angle").text)
-    # Elevation is measured from horizontal, so the ground radius is
-    # altitude / tan(depression angle).
-    depression = abs(max_angle)
-    radius = config.drone.scan_altitude_m / np.tan(depression)
-    assert 2.0 * radius > config.drone.lane_spacing_m, (
-        f"lidar swath {2 * radius:.2f} m does not cover "
-        f"{config.drone.lane_spacing_m:.2f} m lanes"
-    )
+    banned = {"gpu_lidar", "lidar", "ray", "depth_camera", "rgbd_camera"}
+    for model, root in sdf_models.items():
+        kinds = {sensor.get("type") for sensor in root.iter("sensor")}
+        assert not (kinds & banned), f"{model} carries a range sensor: {sorted(kinds & banned)}"
+        assert kinds == {"camera"}, f"{model} has unexpected sensor types: {sorted(kinds)}"
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +332,7 @@ def test_station_plate_size_matches_configuration(config, payload: str) -> None:
 
 
 def test_station_has_a_collision_body_so_it_is_mappable(config) -> None:
-    """A station the lidar cannot see is a station the planner drives into."""
+    """A station the camera cannot resolve is one the planner drives into."""
     root = ET.parse(BRINGUP / "models" / "target_station_target_1" / "model.sdf").getroot()
     boxes = [
         [float(v) for v in box.find("size").text.split()]
@@ -359,9 +341,9 @@ def test_station_has_a_collision_body_so_it_is_mappable(config) -> None:
     ]
     assert boxes, "the station has no collision geometry"
     tallest = max(box[2] for box in boxes)
-    assert tallest > config.world_model.obstacle_min_height_m, (
-        f"the station is only {tallest:.2f} m tall; the mapper treats anything below "
-        f"{config.world_model.obstacle_min_height_m:.2f} m as ground"
+    assert tallest > config.vision.min_obstacle_height_m, (
+        f"the station is only {tallest:.2f} m tall; a silhouette measuring less than "
+        f"{config.vision.min_obstacle_height_m:.2f} m is discarded as floor texture"
     )
 
 
@@ -496,15 +478,18 @@ def test_bridge_covers_every_topic_the_nodes_need(bridge_entries) -> None:
         "/clock",
         "/drone/cmd_vel",
         "/drone/odometry",
-        "/drone/scan/points",
         "/drone/camera/camera_info",
         "/rover/cmd_vel",
         "/rover/odometry",
-        "/rover/scan",
         "/rover/camera/camera_info",
         "/tf",
     }
     assert required <= ros_topics, f"bridge is missing {sorted(required - ros_topics)}"
+    # Cameras and odometry are the entire sensor feed. A bridged range topic
+    # would mean a range sensor had been reintroduced somewhere.
+    sensor_types = {entry["ros_type_name"] for entry in bridge_entries}
+    banned = {"sensor_msgs/msg/LaserScan", "sensor_msgs/msg/PointCloud2", "sensor_msgs/msg/Range"}
+    assert not (sensor_types & banned), f"bridge carries range data: {sorted(sensor_types & banned)}"
 
 
 def test_bridge_directions_are_sane(bridge_entries) -> None:
@@ -531,8 +516,8 @@ def test_bridge_gz_topics_match_the_sdf_plugins(bridge_entries, sdf_models) -> N
                 element = plugin.find(tag)
                 if element is None:
                     continue
-                # The lidar/camera sensor topics get a gz suffix; plugin topics
-                # are bridged verbatim.
+                # Camera sensor topics get a gz suffix; plugin topics are
+                # bridged verbatim.
                 assert element.text in gz_topics, (
                     f"{model_name}: plugin topic {element.text} is not bridged"
                 )
@@ -542,14 +527,16 @@ def test_launch_file_starts_every_mission_node() -> None:
     text = LAUNCH_PATH.read_text(encoding="utf-8")
     for executable in (
         "qr_detector_node",
+        "visual_obstacle_node",
         "world_model_node",
         "drone_explorer_node",
         "rover_path_follower_node",
         "mission_manager_node",
     ):
         assert executable in text, f"{executable} is never launched"
-    # Two detector instances: one per camera.
+    # Two instances of each perception node: one per camera.
     assert text.count("qr_detector_node") >= 2
+    assert text.count("visual_obstacle_node") >= 2
 
 
 def test_gazebo_ci_matrix_repeats_every_configured_target() -> None:
@@ -686,9 +673,9 @@ def test_tf_lookups_do_not_block_and_do_not_drop_late_data() -> None:
     a 0.1 s timeout inside a single-threaded executor. The TF listener is a
     callback on that same executor, so nothing could arrive during the wait and
     the lookup always timed out; a sensor stamped a few ms ahead of the newest
-    transform then had its data thrown away. One Gazebo run integrated zero
-    lidar sweeps and produced a completely empty occupancy grid while every
-    other stage looked healthy.
+    transform then had its data thrown away. One Gazebo run mapped zero camera
+    frames and produced a completely empty occupancy grid while every other
+    stage looked healthy.
     """
     common = (
         REPO_ROOT / "ros2_ws" / "src" / "mission_nodes" / "mission_nodes" / "common.py"
@@ -702,11 +689,11 @@ def test_tf_lookups_do_not_block_and_do_not_drop_late_data() -> None:
     assert "rclpy.time.Time()" in common, "there must be a latest-available fallback"
 
 
-def test_safety_lidar_offset_matches_the_sdf(sdf_models, config) -> None:
-    """The configured lidar offset is used in a safety inequality, so it must
+def test_safety_camera_offset_matches_the_sdf(sdf_models, config) -> None:
+    """The configured camera offset is used in a safety inequality, so it must
     equal the real mounting pose rather than approximate it."""
-    pose, _ = parse_pose(find_sensor(sdf_models["mission_rover"], "safety_lidar").find("pose").text)
-    assert pose[0] == pytest.approx(config.rover.safety_lidar_forward_offset_m, abs=1e-6)
+    pose, _ = parse_pose(find_sensor(sdf_models["mission_rover"], "front_camera").find("pose").text)
+    assert pose[0] == pytest.approx(config.rover.safety_camera_forward_offset_m, abs=1e-6)
 
 
 def test_both_vehicles_publish_an_absolute_pose(sdf_models) -> None:
@@ -778,6 +765,14 @@ def test_scan_altitude_resolves_the_code_at_the_slant_range(config) -> None:
         assert ppm >= config.perception.min_pixels_per_module
 
 
-def test_lane_spacing_is_covered_by_the_downward_lidar(config) -> None:
-    """The grid comes from the lidar, so lanes must overlap *its* cone."""
-    assert config.drone.lane_spacing_m < 2.0 * config.drone.scan_altitude_m
+def test_lane_spacing_is_covered_by_the_mapped_swath(config) -> None:
+    """The grid comes from the camera, so lanes must overlap the strip it maps.
+
+    That strip is a trapezoid - narrowest where the camera looks most steeply
+    down - and it is the narrow end that has to reach the neighbouring lane.
+    """
+    assert config.drone.lane_spacing_m < config.mapping_swath_m()
+    assert config.mapping_swath_m() < config.camera_ground_footprint_m(), (
+        "the swath at the near edge must be the binding constraint, not the "
+        "wider one measured out at the station plates"
+    )

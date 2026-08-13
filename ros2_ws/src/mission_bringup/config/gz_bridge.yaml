@@ -6,6 +6,9 @@
 #
 # Camera images are bridged by ros_gz_image (see mission.launch.py), which is
 # considerably cheaper than routing them through the generic bridge.
+#
+# There are no range-sensor topics here because there are no range sensors: a
+# camera image and an odometry message per vehicle is the entire sensor feed.
 
 - ros_topic_name: "/clock"
   gz_topic_name: "/clock"
@@ -33,12 +36,6 @@
   gz_type_name: "gz.msgs.Pose_V"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/drone/scan/points"
-  gz_topic_name: "/drone/scan/points/points"
-  ros_type_name: "sensor_msgs/msg/PointCloud2"
-  gz_type_name: "gz.msgs.PointCloudPacked"
-  direction: GZ_TO_ROS
-
 - ros_topic_name: "/drone/camera/camera_info"
   gz_topic_name: "/drone/camera/camera_info"
   ros_type_name: "sensor_msgs/msg/CameraInfo"
@@ -63,12 +60,6 @@
   gz_topic_name: "/model/mission_rover/tf"
   ros_type_name: "tf2_msgs/msg/TFMessage"
   gz_type_name: "gz.msgs.Pose_V"
-  direction: GZ_TO_ROS
-
-- ros_topic_name: "/rover/scan"
-  gz_topic_name: "/rover/scan"
-  ros_type_name: "sensor_msgs/msg/LaserScan"
-  gz_type_name: "gz.msgs.LaserScan"
   direction: GZ_TO_ROS
 
 - ros_topic_name: "/rover/camera/camera_info"

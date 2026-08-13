@@ -20,6 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "qr_detector_node = mission_nodes.qr_detector_node:main",
+            "visual_obstacle_node = mission_nodes.visual_obstacle_node:main",
             "world_model_node = mission_nodes.world_model_node:main",
             "drone_explorer_node = mission_nodes.drone_explorer_node:main",
             "mission_manager_node = mission_nodes.mission_manager_node:main",

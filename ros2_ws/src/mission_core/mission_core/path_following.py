@@ -50,7 +50,7 @@ class TrackingStatus:
 
 
 class SafetyStopWatchdog:
-    """Turns a sustained local-lidar stop into a bounded recovery request.
+    """Turns a sustained local-sensor stop into a bounded recovery request.
 
     A momentary return should only suppress forward velocity. A persistent
     return means the planned path is stale, so waiting for the much longer

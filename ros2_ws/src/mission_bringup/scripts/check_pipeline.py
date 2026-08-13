@@ -30,11 +30,12 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image
 from tf2_msgs.msg import TFMessage
 
 from mission_interfaces.msg import (
     ExplorationStatus,
+    GroundObservation,
     QrObservation,
     TargetArray,
     WorldModelStatus,
@@ -82,16 +83,21 @@ def build_stages() -> List[Stage]:
               validator=lambda m: (m.width > 0 and len(m.data) > 0, f"{m.width}x{m.height} {m.encoding}")),
         Stage("drone camera_info", "/drone/camera/camera_info", CameraInfo, qos_profile_sensor_data,
               validator=lambda m: (m.k[0] > 0.0, f"fx={m.k[0]:.1f} cx={m.k[2]:.1f}")),
-        Stage("drone lidar", "/drone/scan/points", PointCloud2, qos_profile_sensor_data,
-              validator=lambda m: (m.width * m.height > 0, f"{m.width * m.height} points, frame={m.header.frame_id}")),
+        Stage("drone ground obs", "/perception/drone/ground_observations", GroundObservation, 10,
+              validator=lambda m: (m.usable,
+                                   f"{len(m.contacts) // 3} contacts, "
+                                   f"{len(m.free_space) // 3} free samples, "
+                                   f"{m.non_ground_fraction:.0%} not floor")),
         Stage("drone odometry", "/drone/odometry", Odometry, qos_profile_sensor_data,
               validator=lambda m: (True, f"z={m.pose.pose.position.z:+.2f} m")),
         Stage("rover camera", "/rover/camera/image", Image, qos_profile_sensor_data,
               validator=lambda m: (m.width > 0 and len(m.data) > 0, f"{m.width}x{m.height} {m.encoding}")),
         Stage("rover odometry", "/rover/odometry", Odometry, qos_profile_sensor_data,
               validator=lambda m: (True, f"x={m.pose.pose.position.x:+.2f} y={m.pose.pose.position.y:+.2f}")),
-        Stage("rover lidar", "/rover/scan", LaserScan, qos_profile_sensor_data,
-              validator=lambda m: (len(m.ranges) > 0, f"{len(m.ranges)} beams")),
+        Stage("rover ground obs", "/perception/rover/ground_observations", GroundObservation, 10,
+              required=False,
+              validator=lambda m: (m.usable,
+                                   f"nearest obstacle ahead {m.nearest_forward_range_m:.2f} m")),
         Stage("tf", "/tf", TFMessage, qos_profile_sensor_data,
               validator=lambda m: (len(m.transforms) > 0,
                                    ",".join(t.child_frame_id for t in m.transforms))),

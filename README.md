@@ -22,8 +22,8 @@ has merely been written.
 
 | Layer | Status |
 |---|---|
-| `mission_core` algorithms (QR/PnP, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed.** 154 tests, including a full offline mission per target. |
-| Offline mission harness (renders real QR textures through a real pinhole camera, ray-casts a lidar, integrates unicycle kinematics) | **Executed.** Drives the production pipeline with zero simulator. Reproduce with `python scripts/run_offline_mission.py`. |
+| `mission_core` algorithms (QR/PnP, monocular mapping, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed.** 181 tests, including a full offline mission per target. |
+| Offline mission harness (renders real QR textures through a real pinhole camera, segments and back-projects those same frames, integrates unicycle kinematics) | **Executed.** Drives the production pipeline with zero simulator. Reproduce with `python scripts/run_offline_mission.py`. |
 | ROS 2 Jazzy layer (interfaces, nodes, launch) | **Executed.** `colcon build` + `colcon test`, interfaces introspectable, every node entry point installed, launch file expands. |
 | **Gazebo Harmonic, full mission** | **Executed.** `gazebo-e2e` launches the whole stack headless and blocks on the real mission verdict. A green workflow requires all three targets to succeed in three independent trials each. |
 
@@ -51,6 +51,13 @@ separate. The development host itself is Windows 11 with no WSL2 and no Docker,
 so ROS 2 and gz-sim cannot run on it — the Ubuntu evidence comes from CI, and
 [§11](#11-known-limitations) lists what CI still does not cover.
 
+> **The Gazebo trace quoted above predates the removal of both lidars.** The
+> mission scenario forbids ranging sensors, so obstacle geometry is now
+> recovered from the vehicles' cameras ([§3.1](#31-monocular-obstacle-mapping)).
+> Everything in `mission_core`, including a full offline mission per target, has
+> been re-run against that pipeline and passes; the Gazebo row is re-earned by
+> the next green `gazebo-e2e`, not by this sentence.
+
 The split exists precisely so that this distinction is possible: all mission
 *logic* lives in a ROS-free library, and the ROS nodes are thin adapters that
 move data between DDS topics and that library.
@@ -67,6 +74,7 @@ and why:
 | **ROS 2 Jazzy** | Current LTS; matches Gazebo Harmonic's default pairing. |
 | **Gazebo Harmonic (gz-sim 8)** + `ros_gz_bridge` | The supported simulator for Jazzy. |
 | **No PX4 / ArduPilot** | The scout needs to hold an altitude and fly a lawnmower. gz-sim's `VelocityControl` does that deterministically. A SITL stack would add a second autopilot, a MAVLink bridge and an attitude-tuning loop to an MVP whose subject is perception and planning. Swapping it in later touches one SDF plugin block and one node's output topic. |
+| **No lidar, and no depth camera either** | Required by the mission scenario. One RGB camera per vehicle is the entire sensor suite, so obstacle geometry has to be *derived* — see [§3.1](#31-monocular-obstacle-mapping). A depth or RGBD sensor would have kept the old point-cloud pipeline almost unchanged, which is exactly why it is not used: it would satisfy the letter of "no lidar" and none of its intent. `test_no_vehicle_carries_a_range_sensor` fails if any is added back. |
 | **No Nav2** | Nav2 was not present, and it brings a behaviour-tree stack, costmap plugins and lifecycle management for a 22 × 22 m arena. A* + pure pursuit is complete, deterministic, and directly verifiable — the planner has a unit test that asserts no path ever intersects an obstacle. |
 | **OpenCV `QRCodeDetector` + `solvePnP`** | Payload and 6-DoF pose both come out of the image. |
 | **A\*** on an observed occupancy grid | Explicitly preferred over RRT* for this scale. |
@@ -82,38 +90,40 @@ and why:
    +--------------------------------------------------------------------------------------+
    |                                  GAZEBO  (mission_arena.sdf)                          |
    |  scout_drone      mission_rover      3x target_station_*      2x static obstacle       |
-   |  nadir camera     front camera       unique QR plate                                   |
-   |  nadir 3D lidar   planar lidar       (top + 4 sides)                                   |
+   |  one RGB camera   one RGB camera     unique QR plate                                   |
+   |  (30 deg down)    (forward)          (top + 4 sides)                                   |
    +--------------------------------------------------------------------------------------+
-        |  image/points/odom                                       cmd_vel  ^
+        |  image/odom                                              cmd_vel  ^
         v                                                                   |
    +----------------------------- ros_gz_bridge + ros_gz_image -----------------------------+
-        |                    |                    |                         |
-        v                    v                    v                         |
- /drone/camera/image   /drone/scan/points   /rover/camera/image              |
-        |                    |                    |                         |
-        v                    |                    v                         |
- +----------------+          |          +----------------+                  |
- | qr_detector    |          |          | qr_detector    |                  |
- |    (drone)     |          |          |    (rover)     |                  |
- | decode -> PnP  |          |          | decode -> PnP  |                  |
- | -> TF -> map   |          |          | -> TF -> map   |                  |
- +-------+--------+          |          +--------+-------+                  |
-         |                   |                   |                          |
-   QrObservation             |             QrObservation                    |
-         |                   |                   |                          |
-         v                   v                   |                          |
-   +-----------------------------------+         |                          |
-   |         world_model_node          |         |                          |
-   |  fuse sightings -> TargetRecord   |         |                          |
-   |  lidar -> OccupancyGrid           |         |                          |
-   |  connected components -> Obstacle |         |                          |
-   +------+---------------+------------+         |                          |
-          |               |                      |                          |
-  /world_model/targets   /world_model/           |                          |
-  /world_model/obstacles  occupancy_grid         |                          |
-          |               |                      |                          |
-          v               v                      v                          |
+        |                                         |                         |
+        v                                         v                         |
+ /drone/camera/image                       /rover/camera/image               |
+        |          \                              |          \              |
+        v           v                             v           v             |
+ +----------------+ +------------------+  +----------------+ +------------------+
+ | qr_detector    | | visual_obstacle  |  | qr_detector    | | visual_obstacle  |
+ |    (drone)     | |     (drone)      |  |    (rover)     | |     (rover)      |
+ | decode -> PnP  | | floor/not-floor  |  | decode -> PnP  | | floor/not-floor  |
+ | -> TF -> map   | | -> ground plane  |  | -> TF -> map   | | -> ground plane  |
+ +-------+--------+ +---------+--------+  +--------+-------+ +---------+--------+
+         |                    |                    |                   |
+   QrObservation      GroundObservation      QrObservation      GroundObservation
+         |                    |                    |                   |
+         |                    |                    |                   +--> rover_path_follower
+         |                    |                    |                   |    (safety stop)
+         v                    v                    |                   |
+   +-----------------------------------+           |                   |
+   |         world_model_node          | <---------|-------------------+
+   |  fuse sightings -> TargetRecord   |           |    (runtime obstacles)
+   |  contacts + floor -> OccupancyGrid|           |
+   |  connected components -> Obstacle |           |
+   +------+---------------+------------+           |
+          |               |                        |                          |
+  /world_model/targets   /world_model/             |                          |
+  /world_model/obstacles  occupancy_grid           |                          |
+          |               |                        |                          |
+          v               v                        v                          |
    +-------------------------------------------------------------+          |
    |                    mission_manager_node                     |          |
    |   MissionOrchestrator: explicit state machine               |          |
@@ -158,13 +168,66 @@ ros2_ws/src/
 │   │   ├── planner.py         A*, shortcutting, approach-pose selection
 │   │   ├── qr.py              decode + PnP marker pose
 │   │   ├── validation.py      the success criteria
+│   │   ├── vision_mapping.py  floor segmentation + ground-plane projection
 │   │   └── world_model.py     the digital twin
-│   └── test/                  154 tests, incl. sim_harness/offline_mission
-├── mission_interfaces/    9 msgs, 2 srvs, 1 action
-├── mission_nodes/         5 rclpy nodes (thin adapters over mission_core)
+│   └── test/                  181 tests, incl. sim_harness/offline_mission
+├── mission_interfaces/    10 msgs, 2 srvs, 1 action
+├── mission_nodes/         6 rclpy nodes (thin adapters over mission_core)
 └── mission_bringup/       world, models, config, launch, rviz, frame checker
 scripts/generate_qr_targets.py   generates the station models from mission.yaml
 ```
+
+### 3.1 Monocular obstacle mapping
+
+Neither vehicle carries a lidar, a depth camera or any other ranging device —
+the scenario does not allow one — so the occupancy grid is built from the same
+RGB frames the QR detector reads. Two facts make that possible without depth:
+the arena floor is a **plane of known height**, and the **pose of the camera
+above it is known** from TF. A pixel plus a plane is an intersection, and an
+intersection is a position; the construction is exact, not fitted.
+
+The geometry is then applied only where it is valid:
+
+* an obstacle's **ground-contact pixel** — the bottom of its silhouette — lies
+  on the floor by definition, so its intersection is the obstacle's true base;
+* pixels **above** that contact are on a vertical face and are deliberately not
+  intersected with the floor. Doing so is the classic inverse-perspective
+  smear: it paints a fake footprint stretching away from the camera. The top of
+  the silhouette is instead intersected with the *vertical line through the
+  contact*, which **measures the obstacle's height** from a single image;
+* pixels classified as floor are intersected and reported as free space;
+* whatever is hidden behind an obstacle yields no pixels at all, so it stays
+  `UNKNOWN`. That matters more here than it did with a lidar: what a camera
+  cannot see behind an obstacle *is* the obstacle's own interior, and with
+  `planner.allow_unknown = false` an unseen interior is never planned through
+  even though only the visible rim is ever marked occupied.
+
+Which pixels are floor is decided by the one assumption that remains: the floor
+is the **dominant surface**, not a hardcoded colour. The robust median of the
+Lab chroma channels is the floor's colour and the MAD is its natural spread, so
+a pixel is not-floor when its chroma sits `vision.chroma_sigma` robust
+deviations away. Three properties follow, and each is pinned by a test in
+[`test_vision_mapping.py`](ros2_ws/src/mission_core/test/test_vision_mapping.py):
+
+* **shadows are not walls.** Sun and ambient are both white, so shadowed floor
+  keeps the floor's hue and only loses lightness. A brightness-based segmenter
+  maps a phantom obstacle beside every real one; a chroma-based one does not.
+  A second, deliberately one-sided lightness test catches achromatic obstacles
+  such as a white QR plate, and cannot fire on a shadow, which is darker.
+* **the sky is not a wall standing at the horizon.** The vanishing line of the
+  ground plane follows from the camera pose alone, and everything above it is
+  excluded from both the answer and the statistics. On the rover — whose camera
+  looks straight ahead — that is half of every frame.
+* **the floor reference is remembered between frames.** Re-deriving it per
+  frame assumes the floor is the majority of every frame, and the moment that
+  stops being true is the moment it matters most: a vehicle close enough to a
+  wall for the wall to fill its view. Learned from frames the floor does
+  dominate and carried forward, the reference stays the floor.
+
+The occupancy mapper then counts contacts and floor samples per cell
+separately, so a cell only becomes occupied when the contact is seen from
+enough viewpoints — a mis-segmented frame cannot carve a hole in a wall, and a
+one-off contact never becomes one.
 
 ---
 
@@ -173,11 +236,15 @@ scripts/generate_qr_targets.py   generates the station models from mission.yaml
 1. **IDLE** — validate the requested payload against `known_payloads`. An
    unknown payload fails here, before takeoff.
 2. **TAKEOFF** — climb to `drone.scan_altitude_m` (6.0 m).
-3. **EXPLORING** — fly a boustrophedon pattern with 5.0 m lanes. The camera
-   footprint is 6.93 m at that altitude, so lanes overlap and nothing is
-   missed. Each frame is decoded; each decode is turned into a marker pose by
-   `solvePnP` and lifted into `map` through TF. The downward lidar fills an
-   occupancy grid in parallel.
+3. **EXPLORING** — fly a boustrophedon pattern with 5.0 m lanes. Each frame is
+   decoded; each decode is turned into a marker pose by `solvePnP` and lifted
+   into `map` through TF, and the *same* frame is segmented into floor and
+   not-floor to fill the occupancy grid. The mapped strip is a trapezoid,
+   narrowest (5.75 m) at its near edge, so 5.0 m lanes still overlap; the
+   pattern is also shifted back by that near edge, because a camera pitched
+   down sees ground *ahead* of the aircraft rather than beneath it, and the
+   pattern has to cover what the sensor sweeps rather than what the vehicle
+   overflies.
 4. **TARGET_FOUND** — the requested payload has `CONFIRMED` status
    (≥3 consistent observations) *and* the sweep has finished, so the digital
    twin is complete rather than merely sufficient.
@@ -233,18 +300,18 @@ continues silently past a critical failure.
 |---|---|---|---|
 | `/drone/camera/image` | `sensor_msgs/Image` | gz bridge | sensor |
 | `/drone/camera/camera_info` | `sensor_msgs/CameraInfo` | gz bridge | sensor |
-| `/drone/scan/points` | `sensor_msgs/PointCloud2` | gz bridge | sensor |
 | `/drone/odometry` | `nav_msgs/Odometry` | gz bridge | sensor |
 | `/drone/cmd_vel` | `geometry_msgs/Twist` | `drone_explorer` | reliable |
 | `/drone/exploration_status` | `mission_interfaces/ExplorationStatus` | `drone_explorer` | latched |
 | `/rover/camera/image` | `sensor_msgs/Image` | gz bridge | sensor |
 | `/rover/camera/camera_info` | `sensor_msgs/CameraInfo` | gz bridge | sensor |
-| `/rover/scan` | `sensor_msgs/LaserScan` | gz bridge | sensor |
 | `/rover/odometry` | `nav_msgs/Odometry` | gz bridge | sensor |
 | `/rover/cmd_vel` | `geometry_msgs/Twist` | `rover_path_follower` | reliable |
 | `/rover/tracking_status` | `mission_interfaces/TrackingStatus` | `rover_path_follower` | latched |
 | `/perception/drone/qr_observations` | `mission_interfaces/QrObservation` | `drone_qr_detector` | reliable |
 | `/perception/rover/qr_observations` | `mission_interfaces/QrObservation` | `rover_qr_detector` | reliable |
+| `/perception/drone/ground_observations` | `mission_interfaces/GroundObservation` | `drone_obstacle_mapper` | reliable |
+| `/perception/rover/ground_observations` | `mission_interfaces/GroundObservation` | `rover_obstacle_mapper` | reliable |
 | `/world_model/targets` | `mission_interfaces/TargetArray` | `world_model` | latched |
 | `/world_model/obstacles` | `mission_interfaces/ObstacleArray` | `world_model` | latched |
 | `/world_model/occupancy_grid` | `nav_msgs/OccupancyGrid` | `world_model` | latched |
@@ -282,9 +349,7 @@ parallel `check_names` / `check_passed` / `check_details` arrays.
 ```
 map
 ├── drone/odom ── drone/base_link ── drone/camera_optical_frame
-│                                 └─ drone/lidar_link
 └── rover/odom ── rover/base_link ── rover/camera_optical_frame
-                                  └─ rover/lidar_link
 ```
 
 * `map → */odom` — static, published by the launch file (see §11).
@@ -296,9 +361,10 @@ map
   [`geometry.py`](ros2_ws/src/mission_core/mission_core/geometry.py) — the same
   matrices the perception code uses. The launch file documents the one-liner
   that regenerates them.
-* The drone lidar is mounted **level** and aimed downward through its vertical
-  scan range instead of by rotating the sensor, so `base_link → lidar_link` is
-  a pure translation. One less rotation to get wrong.
+* Four frames, not six: with the lidars gone there is one sensor per vehicle,
+  so the only mounting transform that can be wrong is the camera's — and that
+  one is checked against the SDF, the launch file and the offline harness by
+  `test_sensor_mount_agrees_everywhere`.
 
 Camera optical frames follow REP-103: x right, y down, z forward. QR poses come
 out of `solvePnP` in the optical frame and are transformed to `map` with a
@@ -375,7 +441,7 @@ for PnP cannot drift apart.
 No ROS installation required — `mission_core` is deliberately ROS-free:
 
 ```bash
-python -m pytest                          # everything (154 tests, ~2 min)
+python -m pytest                          # everything (181 tests, ~6 min)
 python -m pytest -m "not integration"     # fast unit tests only (~3 s)
 python -m pytest -m integration -v        # full end-to-end mission runs
 ```
@@ -390,6 +456,7 @@ cd ros2_ws && colcon test --packages-select mission_core && colcon test-result -
 |---|---|
 | `test_qr_perception.py` | TEST 1 — decode, PnP, TF, degenerate views, bad frames |
 | `test_world_model.py` | TEST 2 — fusion, duplicates, occupancy mapping, obstacle extraction |
+| `test_vision_mapping.py` | TEST 7 — monocular obstacle mapping: measured contacts and heights, shadows, sky, close obstacles |
 | `test_planner.py` | TEST 3 — no path ever intersects an obstacle |
 | `test_mission_failures.py` | TEST 4 & 5 — every `FailureReason`, verification rejection |
 | `test_mission_integration.py` | TEST 6 — full mission per target, plus end-to-end failures |
@@ -410,8 +477,13 @@ the decoder actually worked from can be inspected.
 The integration tests drive the production code through
 `test/offline_mission.py` + `test/sim_harness.py`: real QR textures rendered
 onto real 3D quads through a real pinhole camera model, decoded by real OpenCV,
-posed by real `solvePnP`, mapped by a real ray-cast lidar. No Gazebo, and no
-shortcuts through the logic.
+posed by real `solvePnP`, and mapped by segmenting and back-projecting those
+same rendered frames. No Gazebo, and no shortcuts through the logic.
+
+The harness's surface colours are copied from `mission_arena.sdf` rather than
+invented, because the obstacle mapper now separates floor from not-floor by
+colour: an offline scene with an easier separation than the real arena would
+make every mapping test meaningless.
 
 ---
 
@@ -425,18 +497,25 @@ ever disagreeing.
 
 Notable parameters: `drone.scan_altitude_m`, `drone.scan_speed_mps`,
 `drone.lane_spacing_m`, `perception.qr_detection_rate_hz`,
-`planner.obstacle_safety_margin_m`, `planner.rover_radius_m`,
-`planner.planning_resolution_m`, `planner.approach_distance_m`,
-`rover.goal_tolerance_m`, `rover.max_linear_velocity`,
-`mission.mission_timeout_s`.
+`vision.drone_max_range_m`, `vision.chroma_sigma`,
+`vision.min_obstacle_height_m`, `planner.obstacle_safety_margin_m`,
+`planner.rover_radius_m`, `planner.planning_resolution_m`,
+`planner.approach_distance_m`, `rover.goal_tolerance_m`,
+`rover.max_linear_velocity`, `mission.mission_timeout_s`.
+
+The whole `vision:` section is the sensor model: with no ranging device on
+either vehicle, those values *are* how a frame becomes geometry.
 
 `MissionConfig.validate()` runs at every node's startup and **refuses to
 start** on an incoherent configuration. It catches, among others:
 
 * a scan altitude at which the QR codes cannot be resolved (it computes
   pixels-per-module for every payload);
-* a lane spacing wider than the camera's ground footprint (which would leave
-  unscanned strips);
+* a lane spacing wider than the mapped ground swath — measured at the near
+  edge of the camera's view, where the strip it maps is narrowest, not at the
+  station plates where it is widest (which would leave unmapped strips);
+* a trusted vision range shorter than the near edge of that view, which would
+  discard every contact and leave the grid empty;
 * a goal tolerance larger than the approach distance (the rover would stop
   inside the station);
 * a planning resolution coarser than the rover radius;
@@ -456,6 +535,8 @@ start** on an incoherent configuration. It catches, among others:
 | Obstacle avoidance is real | `test_planner.py` densely resamples every planned path and asserts it never enters the inflated grid; `test_mission_integration.py` additionally asserts the *driven trajectory* stays clear, and that the straight line would have collided. |
 | Position alone is never success | `MissionValidator` requires `rover_qr_verification`; `test_position_alone_never_produces_success` pins it. |
 | Ground truth is test-only | `SyntheticWorld.ground_truth_station_xy()` is called from exactly two assertions, both after the mission has finished. |
+| No ranging sensor smuggled back in | `test_no_vehicle_carries_a_range_sensor` fails if any SDF gains a `gpu_lidar`, `ray`, `depth_camera` or `rgbd_camera`; a second check fails if the gz bridge ever carries `LaserScan`, `PointCloud2` or `Range`. |
+| Obstacle geometry is measured, not assumed | `test_vision_mapping.py` puts a wall of known size at a known place and requires the contact within 5 cm and the height within 10 cm — from one synthetic mask and the camera pose alone. |
 
 ---
 
@@ -493,7 +574,7 @@ E. **Odometry yaw drift left the station just outside the camera.** The rover
 F. **TF lookups blocked and then discarded data.** Waiting on a transform
    inside a single-threaded executor cannot work — the TF listener is a
    callback on that same executor — and a sensor stamped 20 ms ahead of the
-   newest transform had its data dropped. One run integrated zero lidar sweeps
+   newest transform had its data dropped. One run mapped zero camera frames
    and produced a completely empty map.
 G. **The validator judged a path against a later map.** Runtime obstacle
    mapping grows the grid while the rover drives, so a completed, verified
@@ -522,15 +603,54 @@ G. **The validator judged a path against a later map.** Runtime obstacle
 5. **A snapped start point produced a path whose first segment was inside the
    inflation zone**, defeating the planner's own collision guarantee.
 
+**Found while replacing the lidars with the cameras:**
+
+6. **The lawnmower covered the ground under the drone, not the ground it can
+   see.** A lidar pointing down maps what the aircraft overflies; a camera
+   pitched 30° down cannot see anything closer than 2.97 m ahead of itself. The
+   unshifted pattern left the first stretch of every lane permanently
+   unobserved — including the corner the rover is parked in — and the very
+   first plan failed with `NO_VALID_PATH` because the rover's own start cell
+   had never been observed. The pattern is now shifted back by exactly that
+   near edge.
+7. **The offline renderer deleted obstacles the moment they got close.** Any
+   face with a single corner behind the image plane was skipped whole, because
+   there was no near-plane clipping — so a wall the drone was flying past
+   vanished from the frame, the floor was drawn where it should have been, and
+   the mapper marked the wall's own footprint free. Harmless when a lidar did
+   the mapping; fatal once the mapping is done from these pixels. The renderer
+   now clips faces (Sutherland–Hodgman) and builds the texture homography from
+   the quad's geometry instead of its four projected corners, which no longer
+   all exist.
+8. **A per-frame floor-colour model inverts exactly when it matters.** The
+   floor is identified as the dominant surface, so a frame filled by a wall
+   makes the *wall* the reference and the strip of real floor beside it the
+   "obstacle" — at the moment the vehicle is closest to something solid. The
+   reference is now learned from frames the floor demonstrably owns and carried
+   forward; a frame that cannot establish one is not mapped at all.
+9. **A failed validation crashed the mission manager.** `report.failure_reason
+   or <default>` — but `FailureReason` is a `str` enum, so `NONE` is *truthy*
+   and was passed straight through to a state machine that refuses to enter
+   `MISSION_FAILED` without a reason. Not every check carries one (a rover that
+   never reached its goal is not a planner fault), so a clean, explainable
+   mission failure became a traceback. Found by a mission that legitimately
+   failed validation while the sensor change was being brought up.
+
 ---
 
 ## 11. Known limitations
 
-**What the Gazebo evidence does and does not cover.** The `gazebo-e2e` job runs
+**The Gazebo evidence predates the sensor change.** The `gazebo-e2e` job runs
 the real mission to `MISSION_SUCCESS` on Ubuntu 24.04 with ROS 2 Jazzy and
-Gazebo Harmonic, so the frame tree, the sensor plumbing, the OBJ/MTL texturing,
-the plugin names and the whole state machine are exercised for real. The
-remaining caveats:
+Gazebo Harmonic — frame tree, sensor plumbing, OBJ/MTL texturing, plugin names
+and the whole state machine, for real. That evidence was collected *before*
+both lidars were removed. The mission logic, the new mapper and a full offline
+mission per target have all been re-run since and pass, but the first run of
+the camera-only pipeline inside Gazebo is the next `gazebo-e2e`, and until it
+is green this row is a claim about code that has not met the renderer.
+Specifically unproven offline: how Ogre's lighting and shadows affect the
+floor/not-floor separation, which is the one part of the new pipeline whose
+input the offline renderer only approximates. The remaining caveats:
 
 1. **CI flies at 0.5 m/s instead of the shipped 1.6.** GitHub runners have no
    GPU, so Gazebo renders the drone camera through llvmpipe at roughly 0.7
@@ -572,10 +692,30 @@ that localise a problem to a stage on a new machine.
   uncorrected. This is the standard MVP simplification; note that it concerns
   *self*-localisation only — target positions are always perceived.
 * **The Gazebo scenario's obstacles are static.** At runtime, a newly appeared
-  obstacle is added to the shared map from the rover lidar; a sustained safety
-  stop triggers a bounded replan from the live rover pose. Runtime obstacle
-  evidence is currently sticky, so a moved-away obstacle is not cleared until
-  the map is reset; evidence decay remains future work.
+  obstacle is added to the shared map from the rover's own camera; a sustained
+  safety stop triggers a bounded replan from the live rover pose. Runtime
+  obstacle evidence is currently sticky, so a moved-away obstacle is not
+  cleared until the map is reset; evidence decay remains future work.
+* **Monocular mapping assumes a flat floor of one appearance.** Every position
+  it reports comes from intersecting a ray with the plane `vision.ground_z_m`,
+  so a slope, a step or a ramp would be read as a range error, and an obstacle
+  whose colour matches the floor's is invisible to it. Both are properties of
+  the arena, not of the algorithm, and both would need a real ground model or a
+  second cue to lift.
+* **A camera maps rims, not volumes.** Only the line where an obstacle meets
+  the floor is ever measured; the interior is occluded and stays `UNKNOWN`,
+  which is what keeps the planner out of it (`allow_unknown: false`). An
+  obstacle much thicker than twice the inflation radius therefore needs to be
+  seen from more than one side before its far edge exists in the map at all.
+  A handful of rays grazing a silhouette's lateral edge can also mark an
+  interior cell free; inflation from the mapped rim covers that for the 1 m
+  walls in this arena, and would not for a much thicker one.
+* **Measured obstacle height is an upper bound.** Seen from above, the top of a
+  silhouette is the object's *far* top edge, and one view cannot separate that
+  from a taller object standing at the contact point. The overestimate is about
+  `depth x (altitude - height) / range` — 0.4 m on this arena's walls. Height
+  feeds the `ObstacleArray` topic, RViz and the "is this tall enough to be an
+  obstacle" gate, none of which are harmed by erring high.
 * **2D planning.** The rover is a ground vehicle and the arena is flat.
 * **Obstacle footprints are axis-aligned bounding boxes** from connected
   components. Fine for the boxes in this world; an L-shaped obstacle would be
@@ -597,7 +737,8 @@ that localise a problem to a stage on a new machine.
 | No QR observations | `ros2 topic hz /drone/camera/image`; then `ros2 param set /drone_qr_detector publish_annotated_image true` and view `~/annotated_image`. |
 | `TF unavailable` warnings | `ros2 run tf2_tools view_frames`; confirm `/tf` is being bridged from `/model/*/tf`. |
 | Everything offset by a constant | `ros2 run mission_bringup check_frames.py` (limitation 1 above). |
-| Empty occupancy grid | `ros2 topic hz /drone/scan/points`, and confirm the `Sensors` system is in the world file. |
+| Empty occupancy grid | `ros2 topic echo /perception/drone/ground_observations --once` — are there contacts and free samples? If `usable` is false, the floor was not the dominant surface in the frame. Also confirm the `Sensors` system is in the world file. |
+| Phantom obstacles across the map | The floor/not-floor split is failing. `ros2 param set /drone_obstacle_mapper vision.chroma_sigma 5.0` widens the tolerance; a mapper that reports a high `non_ground_fraction` on open floor has lost its floor reference. |
 | `NO_VALID_PATH` | `ros2 topic echo /world_model/occupancy_grid --once` in RViz; the map may be too sparse, or `obstacle_safety_margin_m` too large for the gap. |
 | Mission never leaves `EXPLORING` | `ros2 topic echo /world_model/status` — is the payload listed, and is it `CONFIRMED` rather than `TENTATIVE`/`AMBIGUOUS`? |
 | Rover reaches the goal but never verifies | `verification.max_range_m` versus the actual standoff; `ros2 topic echo /perception/rover/qr_observations`. |

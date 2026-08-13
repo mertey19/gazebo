@@ -13,7 +13,7 @@ every few simulated steps:
 
 This is the offline harness, not Gazebo. Nothing here is mocked - the QR codes
 are decoded by OpenCV from rendered imagery, the map comes from a ray-cast
-lidar, the route from A*, the driving from pure pursuit - but the physics and
+camera, the route from A*, the driving from pure pursuit - but the physics and
 the renderer are simplified. The Gazebo evidence lives in CI; use
 `--gazebo-frames` to build a video out of frames captured from a real run.
 

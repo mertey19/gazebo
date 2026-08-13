@@ -264,7 +264,7 @@ def test_tracking_failure_replans_once_from_the_live_rover_pose() -> None:
     run_to_state(orchestrator, MissionState.ROVER_NAVIGATING)
 
     # A new obstacle appears across the path after it was published. The rover
-    # lidar updates the shared grid before its safety watchdog requests replan.
+    # camera updates the shared grid before its safety watchdog requests replan.
     stale_path = orchestrator.path.xy.copy()
     segment_lengths = np.linalg.norm(np.diff(stale_path, axis=0), axis=1)
     blocked_segment = int(np.argmax(segment_lengths))
@@ -506,7 +506,7 @@ def test_validation_uses_the_map_the_path_was_planned_against() -> None:
 
     Regression from a Gazebo run: the rover drove its route, arrived, and
     verified TARGET_2 correctly - and the mission was then failed with
-    PATH_INTERSECTS_OBSTACLE, because the rover's own lidar had meanwhile
+    PATH_INTERSECTS_OBSTACLE, because the rover's own camera had meanwhile
     added cells to the shared map and the validator re-checked the old path
     against the new grid. A path can only ever be judged on what was known
     when it was made; a genuinely new obstacle on the remaining route is

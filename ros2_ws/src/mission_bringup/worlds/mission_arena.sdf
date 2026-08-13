@@ -32,7 +32,8 @@
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system"
             name="gz::sim::systems::SceneBroadcaster"/>
-    <!-- Required for the camera and gpu_lidar sensors to produce data. -->
+    <!-- Required for the camera sensors to produce data. Without it the
+         mission has no sensing at all: the cameras are its only input. -->
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>

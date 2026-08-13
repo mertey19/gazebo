@@ -86,6 +86,20 @@ class MissionOutputs:
         return self.state in (MissionState.MISSION_SUCCESS, MissionState.MISSION_FAILED)
 
 
+def _reported_reason(report: ValidationReport) -> FailureReason:
+    """The reason to abort with when a validation report has failed.
+
+    ``FailureReason`` is a ``str`` enum, so ``NONE`` is *truthy* and the obvious
+    ``report.failure_reason or <default>`` silently passes ``NONE`` through to
+    the state machine, which then refuses to enter ``MISSION_FAILED`` at all -
+    turning a clean, explainable mission failure into a crash inside the
+    manager. Not every check carries a reason (a rover that never reached its
+    goal is not a planner fault), so this path is reachable.
+    """
+    reason = report.failure_reason
+    return reason if reason is not FailureReason.NONE else FailureReason.NAVIGATION_TIMEOUT
+
+
 class MissionOrchestrator:
     """Drives the mission from IDLE to a terminal state."""
 
@@ -123,7 +137,7 @@ class MissionOrchestrator:
         self.rover_final_xy: Optional[np.ndarray] = None
         #: The occupancy grid the accepted path was planned against. The
         #: validator must judge the path on what was known when it was made,
-        #: not on obstacles discovered afterwards - the rover's own lidar adds
+        #: not on obstacles discovered afterwards - the rover's own camera adds
         #: cells while it drives, and a path can only ever have been checked
         #: against the map that existed at planning time. A new obstacle on the
         #: remaining route is handled live, by the replan path, not by
@@ -586,7 +600,7 @@ class MissionOrchestrator:
         leg_report = self._build_report()
         if not leg_report.passed:
             return self._fail(
-                leg_report.failure_reason or FailureReason.QR_VERIFICATION_MISMATCH,
+                _reported_reason(leg_report),
                 "QR matched but automated validation failed: "
                 + "; ".join(c.name for c in leg_report.failures),
                 now,
@@ -648,7 +662,7 @@ class MissionOrchestrator:
         outputs.report = report
         if not report.passed:
             return self._fail(
-                report.failure_reason or FailureReason.QR_VERIFICATION_MISMATCH,
+                _reported_reason(report),
                 "the tour finished but validation failed: "
                 + "; ".join(c.name for c in report.failures),
                 now,

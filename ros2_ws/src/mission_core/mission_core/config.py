@@ -28,10 +28,8 @@ class FrameConfig:
     odom_frame: str = "odom"
     drone_base_frame: str = "drone/base_link"
     drone_camera_optical_frame: str = "drone/camera_optical_frame"
-    drone_lidar_frame: str = "drone/lidar_link"
     rover_base_frame: str = "rover/base_link"
     rover_camera_optical_frame: str = "rover/camera_optical_frame"
-    rover_lidar_frame: str = "rover/lidar_link"
 
 
 @dataclass(frozen=True)
@@ -83,7 +81,8 @@ class DroneConfig:
     scan_altitude_m: float = 4.0
     takeoff_speed_mps: float = 1.2
     scan_speed_mps: float = 1.6
-    #: Spacing between lawnmower legs. Must be < camera ground footprint.
+    #: Spacing between lawnmower legs. Must be < the mapped ground swath, which
+    #: is narrower than the swath at the station plates - see mapping_swath_m().
     lane_spacing_m: float = 5.0
     #: Inset from the arena edge so the drone stays inside the mapped area.
     scan_margin_m: float = 2.0
@@ -129,13 +128,13 @@ class RoverConfig:
     approach_slowdown_m: float = 1.0
     navigation_timeout_s: float = 240.0
     control_rate_hz: float = 20.0
-    #: Emergency stop range from the rover's 2D safety lidar. Must stay below
-    #: the clearance the planner guarantees, measured from the lidar rather
-    #: than from base_link - otherwise the stop fires on the rover's own
-    #: correctly planned path instead of on a genuine surprise.
+    #: Emergency stop range from the obstacle bases the rover's own camera
+    #: measures. Must stay below the clearance the planner guarantees, measured
+    #: from the camera rather than from base_link - otherwise the stop fires on
+    #: the rover's own correctly planned path instead of on a genuine surprise.
     obstacle_stop_distance_m: float = 0.30
-    #: Forward mounting offset of that lidar; mirrors the SDF <pose>.
-    safety_lidar_forward_offset_m: float = 0.24
+    #: Forward mounting offset of that camera; mirrors the SDF <pose>.
+    safety_camera_forward_offset_m: float = 0.22
     #: Half-width of the forward wedge the stop considers. Wide wedges see
     #: walls the rover is merely driving past, not heading into.
     obstacle_stop_half_angle_rad: float = 0.35
@@ -169,18 +168,59 @@ class WorldModelConfig:
     min_observations: int = 3
     min_confidence: float = 0.35
     grid_resolution_m: float = 0.20
-    obstacle_min_height_m: float = 0.25
-    obstacle_max_height_m: float = 8.0
     mapper_min_hits: int = 2
     mapper_hit_ratio: float = 0.35
     publish_rate_hz: float = 2.0
 
 
 @dataclass(frozen=True)
+class VisionConfig:
+    """Monocular obstacle mapping - the mission's only source of geometry.
+
+    There is no ranging sensor on either vehicle, so every one of these values
+    describes how an RGB frame is turned into floor geometry.  See
+    :mod:`mission_core.vision_mapping` for what each stage does.
+    """
+
+    #: Height of the arena floor in ``map``. The plane every pixel is
+    #: intersected with; a sloped or stepped site would need a real ground model.
+    ground_z_m: float = 0.0
+    #: Horizontal range beyond which the drone's contacts are discarded. Rays
+    #: near the top of a depressed camera's frame graze the floor and reach the
+    #: horizon, where one pixel of segmentation error is worth many metres.
+    drone_max_range_m: float = 10.0
+    #: The rover's camera only has to see far enough to stop; anything beyond
+    #: that is the drone's job and is measured from a far better viewpoint.
+    rover_max_range_m: float = 6.0
+    min_obstacle_height_m: float = 0.25
+    max_obstacle_height_m: float = 8.0
+    #: Every ``column_stride_px`` image column contributes at most one contact,
+    #: and every ``free_stride_px`` pixel one free sample.
+    column_stride_px: int = 8
+    free_stride_px: int = 16
+    #: How many robust deviations of chroma from the floor's own colour make a
+    #: pixel non-ground.
+    chroma_sigma: float = 3.5
+    #: Extra Lab lightness (0-255) above the floor that marks an achromatic
+    #: obstacle. One-sided on purpose: shadows are darker, never brighter.
+    bright_luma_margin: float = 40.0
+    min_blob_area_px: float = 200.0
+    #: Segmentation runs on the frame decimated by this factor.
+    segmentation_downsample: int = 2
+    #: A frame with more non-floor than this does not get to say what the
+    #: floor looks like; until some frame has, nothing is mapped at all.
+    max_non_ground_fraction: float = 0.35
+    #: Contacts this close to another vehicle are that vehicle. The drone flies
+    #: escort behind the rover, so without this the rover is mapped as an
+    #: obstacle standing on its own route.
+    self_filter_radius_m: float = 1.0
+
+
+@dataclass(frozen=True)
 class PlannerConfig:
     rover_radius_m: float = 0.30
     #: Clearance added to the rover radius. Sized so pure pursuit can cut a
-    #: corner by ~0.12 m and the safety lidar still reads more than
+    #: corner by ~0.12 m and the rover camera still measures more than
     #: rover.obstacle_stop_distance_m on a clean path.
     obstacle_safety_margin_m: float = 0.40
     planning_resolution_m: float = 0.20
@@ -231,6 +271,7 @@ class MissionConfig:
     drone: DroneConfig = field(default_factory=DroneConfig)
     rover: RoverConfig = field(default_factory=RoverConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
     world_model: WorldModelConfig = field(default_factory=WorldModelConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
@@ -261,6 +302,39 @@ class MissionConfig:
         """How far ahead of the drone the camera axis meets the ground."""
         height = self.drone.scan_altitude_m - self.mission.station_plate_centre_height_m
         return height / math.tan(self.drone.camera_depression_rad)
+
+    def camera_vertical_fov_rad(self) -> float:
+        """Vertical field of view, from the same intrinsics gz derives."""
+        from .camera import PinholeCamera
+
+        camera = PinholeCamera.from_hfov(
+            self.drone.camera.width,
+            self.drone.camera.height,
+            self.drone.camera.horizontal_fov_rad,
+        )
+        return 2.0 * math.atan(0.5 * camera.height / camera.fy)
+
+    def mapping_near_edge_m(self) -> float:
+        """Horizontal distance to the closest floor the drone camera can map.
+
+        The bottom row of a depressed camera looks down most steeply, so it is
+        the near edge of the mapped strip - and the narrowest part of it.
+        """
+        angle = self.drone.camera_depression_rad + 0.5 * self.camera_vertical_fov_rad()
+        if angle >= math.pi / 2.0:
+            return 0.0
+        return self.drone.scan_altitude_m / math.tan(angle)
+
+    def mapping_swath_m(self) -> float:
+        """Width of the mapped floor strip at that near edge.
+
+        Coverage of the occupancy grid is bounded by this, not by the swath at
+        the station plates: the strip is a trapezoid that is narrowest where the
+        camera looks most steeply down.
+        """
+        angle = self.drone.camera_depression_rad + 0.5 * self.camera_vertical_fov_rad()
+        slant = self.drone.scan_altitude_m / math.sin(min(angle, math.pi / 2.0))
+        return 2.0 * slant * math.tan(self.drone.camera.horizontal_fov_rad / 2.0)
 
     def code_size_m(self, payload: str) -> float:
         """Physical side length of the code area for one payload."""
@@ -316,16 +390,35 @@ class MissionConfig:
             problems.append(
                 "drone.camera_depression_rad must lie between 0.05 rad and pi/2"
             )
-        # The lidar, not the camera, is what fills the occupancy grid, and it
-        # looks straight down - so coverage is limited by its cone, not by the
-        # camera swath.
-        lidar_radius = self.drone.scan_altitude_m  # 45 deg outer ray
-        if self.drone.lane_spacing_m >= 2.0 * lidar_radius:
+        # The same camera fills the occupancy grid, and the strip it maps is a
+        # trapezoid: narrowest at the near edge, where it looks most steeply
+        # down. That narrow end is what has to cover the lane spacing.
+        swath = self.mapping_swath_m()
+        if self.drone.lane_spacing_m >= swath:
             problems.append(
-                f"drone.lane_spacing_m ({self.drone.lane_spacing_m:.2f} m) exceeds the "
-                f"downward lidar's {2.0 * lidar_radius:.2f} m ground diameter at "
-                f"{self.drone.scan_altitude_m:.1f} m: the occupancy grid would have gaps"
+                f"drone.lane_spacing_m ({self.drone.lane_spacing_m:.2f} m) is not smaller "
+                f"than the {swath:.2f} m mapped swath at the near edge of the camera's "
+                f"view: the occupancy grid would have unobserved strips"
             )
+        near_edge = self.mapping_near_edge_m()
+        if self.vision.drone_max_range_m <= near_edge:
+            problems.append(
+                f"vision.drone_max_range_m ({self.vision.drone_max_range_m:.2f} m) is "
+                f"inside the {near_edge:.2f} m near edge of the drone camera's ground "
+                "view: every contact would be discarded and the grid would stay empty"
+            )
+        if self.vision.min_obstacle_height_m >= self.vision.max_obstacle_height_m:
+            problems.append(
+                "vision.min_obstacle_height_m must be below vision.max_obstacle_height_m"
+            )
+        if not 0.0 < self.vision.max_non_ground_fraction <= 1.0:
+            problems.append("vision.max_non_ground_fraction must lie in (0, 1]")
+        if self.vision.chroma_sigma <= 0.0:
+            problems.append("vision.chroma_sigma must be positive")
+        if self.vision.segmentation_downsample < 1:
+            problems.append("vision.segmentation_downsample must be at least 1")
+        if self.vision.column_stride_px < 1 or self.vision.free_stride_px < 1:
+            problems.append("vision pixel strides must be at least 1")
 
         if self.planner.planning_resolution_m > self.planner.rover_radius_m:
             problems.append(
@@ -344,12 +437,12 @@ class MissionConfig:
             )
         # The emergency stop must never be able to fire on a path the planner
         # itself produced; it exists for obstacles the map did not contain.
-        lidar_clearance = self.clearance_m - self.rover.safety_lidar_forward_offset_m
-        if self.rover.obstacle_stop_distance_m >= lidar_clearance:
+        camera_clearance = self.clearance_m - self.rover.safety_camera_forward_offset_m
+        if self.rover.obstacle_stop_distance_m >= camera_clearance:
             problems.append(
                 f"rover.obstacle_stop_distance_m ({self.rover.obstacle_stop_distance_m:.2f} m) "
-                f"is not below the clearance visible to the safety lidar "
-                f"({lidar_clearance:.2f} m = rover radius + safety margin - lidar offset); "
+                f"is not below the clearance visible to the rover camera "
+                f"({camera_clearance:.2f} m = rover radius + safety margin - camera offset); "
                 "the emergency stop would trigger on the rover's own planned path"
             )
         if self.rover.max_replans < 0:

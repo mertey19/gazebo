@@ -3,9 +3,9 @@
 
 Drives the production ``mission_core`` pipeline against the synthetic arena in
 ``test/sim_harness.py``: real QR textures rendered through a real pinhole
-camera model, decoded by OpenCV, posed by ``solvePnP``, mapped by a ray-cast
-lidar, planned by A*, tracked by pure pursuit, and verified by the rover's own
-camera.
+camera model, decoded by OpenCV, posed by ``solvePnP``, mapped by intersecting
+those same frames with the ground plane, planned by A*, tracked by pure pursuit,
+and verified by the rover's own camera.
 
 Useful for reproducing the verification results on a machine with no ROS
 installation, and for debugging mission logic without waiting for a simulator.

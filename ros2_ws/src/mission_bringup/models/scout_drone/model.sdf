@@ -60,10 +60,17 @@
       </collision>
 
       <!--
-        Forward-down camera. The mount offset (0.10, 0, -0.08) is mirrored by
-        DRONE_CAMERA_MOUNT in the offline harness and by the static transform
-        published in mission.launch.py; all three must agree or every target
-        lands offset along its viewing ray.
+        Forward-down camera - the drone's only sensor. It carries the whole
+        mission: the QR detector decodes station plates from these frames and
+        the obstacle mapper recovers the arena's geometry from the same ones,
+        by intersecting each pixel with the known ground plane. There is
+        deliberately no lidar, depth camera or other ranging device on this
+        vehicle; see README "Monocular obstacle mapping".
+
+        The mount offset (0.10, 0, -0.08) is mirrored by DRONE_CAMERA_MOUNT in
+        the offline harness and by the static transform published in
+        mission.launch.py; all three must agree or every target lands offset
+        along its viewing ray.
       -->
       <sensor name="down_camera" type="camera">
         <!-- Pitched 30 degrees below horizontal (drone.camera_depression_rad).
@@ -94,46 +101,6 @@
         </camera>
       </sensor>
 
-      <!--
-        Downward 3D lidar; the only source of obstacle geometry in the mission.
-        Deliberately mounted level and aimed downwards through its *vertical
-        scan range* (-90 deg to -45 deg) rather than by rotating the sensor:
-        an unrotated sensor frame makes drone/base_link -> drone/lidar_link a
-        pure translation, which removes an easy place to get a rotation wrong
-        and smear the whole occupancy grid.
-
-        At the 6 m scan altitude that cone reaches a 6 m ground radius, so
-        consecutive 5 m lawnmower lanes overlap and the arena is fully mapped.
-      -->
-      <sensor name="down_lidar" type="gpu_lidar">
-        <pose>0 0 -0.06 0 0 0</pose>
-        <always_on>1</always_on>
-        <update_rate>5</update_rate>
-        <visualize>false</visualize>
-        <topic>/drone/scan/points</topic>
-        <gz_frame_id>drone/lidar_link</gz_frame_id>
-        <lidar>
-          <scan>
-            <horizontal>
-              <samples>180</samples>
-              <resolution>1</resolution>
-              <min_angle>-3.14159</min_angle>
-              <max_angle>3.14159</max_angle>
-            </horizontal>
-            <vertical>
-              <samples>24</samples>
-              <resolution>1</resolution>
-              <min_angle>-1.5707963</min_angle>
-              <max_angle>-0.7853982</max_angle>
-            </vertical>
-          </scan>
-          <range>
-            <min>0.30</min>
-            <max>30.0</max>
-            <resolution>0.01</resolution>
-          </range>
-        </lidar>
-      </sensor>
     </link>
 
     <!-- Body-frame twist input. drone_explorer_node rotates its map-frame

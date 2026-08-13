@@ -1,11 +1,12 @@
 """World model node - the digital twin.
 
-Fuses QR observations into per-station estimates and lidar returns into a 2D
-occupancy grid, then publishes both as ROS messages so every other node works
-from the same picture of the world.
+Fuses QR observations into per-station estimates and monocular ground
+observations into a 2D occupancy grid, then publishes both as ROS messages so
+every other node works from the same picture of the world.
 
-Everything published here was *observed*.  The node has no access to the
-simulator's model list or ground-truth poses.
+Everything published here was *observed*, by a camera.  The node has no access
+to the simulator's model list or ground-truth poses, and there is no range
+sensor anywhere in the stack.
 """
 
 from __future__ import annotations
@@ -16,14 +17,13 @@ import numpy as np
 import rclpy
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan, PointCloud2
-from sensor_msgs_py import point_cloud2
 from visualization_msgs.msg import Marker, MarkerArray
 
-from mission_core.occupancy import GridMetadata, OccupancyMapper, planar_scan_hit_points
+from mission_core.occupancy import GridMetadata, OccupancyMapper
 from mission_core.world_model import TargetObservation, TargetStatus, WorldModel
 
 from mission_interfaces.msg import (
+    GroundObservation,
     ObstacleArray,
     QrObservation,
     TargetArray,
@@ -34,9 +34,7 @@ from mission_interfaces.srv import GetTarget
 from .common import (
     DEFAULT_QOS,
     LATCHED_QOS,
-    SENSOR_QOS,
     declare_mission_config,
-    lookup_transform,
     make_header,
     obstacle_to_msg,
     occupancy_to_msg,
@@ -44,6 +42,14 @@ from .common import (
     stamp_to_seconds,
     target_record_to_msg,
 )
+
+
+def _points_to_array(flat) -> np.ndarray:
+    """A flat ``[x, y, z, ...]`` message array -> ``(N, 3)``."""
+    points = np.asarray(flat, dtype=float)
+    if points.size < 3:
+        return np.zeros((0, 3), dtype=float)
+    return points[: points.size - points.size % 3].reshape(-1, 3)
 
 
 class WorldModelNode(Node):
@@ -62,8 +68,14 @@ class WorldModelNode(Node):
         self.declare_parameter(
             "observation_topics", ["/perception/drone/qr_observations"]
         )
-        self.declare_parameter("point_cloud_topic", "/drone/scan/points")
-        self.declare_parameter("laser_scan_topic", "/rover/scan")
+        # The drone's frames build the shared map; the rover's are local
+        # evidence that something has changed on a route already mapped.
+        self.declare_parameter(
+            "mapping_observation_topic", "/perception/drone/ground_observations"
+        )
+        self.declare_parameter(
+            "runtime_observation_topic", "/perception/rover/ground_observations"
+        )
         self.declare_parameter("publish_markers", True)
 
         frames = self.config.frames
@@ -76,16 +88,9 @@ class WorldModelNode(Node):
         )
         self.mapper = OccupancyMapper(
             self._grid_metadata(),
-            obstacle_min_height_m=self.config.world_model.obstacle_min_height_m,
-            obstacle_max_height_m=self.config.world_model.obstacle_max_height_m,
             min_hits=self.config.world_model.mapper_min_hits,
             hit_ratio_threshold=self.config.world_model.mapper_hit_ratio,
         )
-
-        from tf2_ros import Buffer, TransformListener
-
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.targets_pub = self.create_publisher(TargetArray, "/world_model/targets", LATCHED_QOS)
         self.obstacles_pub = self.create_publisher(
@@ -108,16 +113,16 @@ class WorldModelNode(Node):
             self.get_logger().info(f"[WORLD_MODEL] consuming observations from {topic}")
 
         self.create_subscription(
-            PointCloud2,
-            str(self.get_parameter("point_cloud_topic").value),
-            self._on_point_cloud,
-            SENSOR_QOS,
+            GroundObservation,
+            str(self.get_parameter("mapping_observation_topic").value),
+            self._on_mapping_observation,
+            DEFAULT_QOS,
         )
         self.create_subscription(
-            LaserScan,
-            str(self.get_parameter("laser_scan_topic").value),
-            self._on_laser_scan,
-            SENSOR_QOS,
+            GroundObservation,
+            str(self.get_parameter("runtime_observation_topic").value),
+            self._on_runtime_observation,
+            DEFAULT_QOS,
         )
 
         self.create_service(GetTarget, "/world_model/get_target", self._on_get_target)
@@ -125,7 +130,7 @@ class WorldModelNode(Node):
             1.0 / max(self.config.world_model.publish_rate_hz, 1e-3), self._publish
         )
 
-        self._cloud_frame_failures = 0
+        self._rejected_frames = 0
         self._last_summary = ""
         self.get_logger().info(
             f"[WORLD_MODEL] grid {self.mapper.metadata.width}x{self.mapper.metadata.height} "
@@ -190,51 +195,44 @@ class WorldModelNode(Node):
                 f"more than one location. Refusing to treat it as a usable target."
             )
 
-    def _on_point_cloud(self, msg: PointCloud2) -> None:
-        """Fold a lidar sweep into the occupancy grid, in the map frame."""
-        map_from_sensor, error = lookup_transform(
-            self.tf_buffer, self.map_frame, msg.header.frame_id, msg.header.stamp
-        )
-        if map_from_sensor is None:
-            self._cloud_frame_failures += 1
-            self.get_logger().warn(
-                f"[WORLD_MODEL] dropping lidar sweep: {error}", throttle_duration_sec=5.0
+    def _reject_foreign_frame(self, msg: GroundObservation) -> bool:
+        """Guard against evidence expressed in something other than ``map``."""
+        if msg.header.frame_id and msg.header.frame_id != self.map_frame:
+            self.get_logger().error(
+                f"[WORLD_MODEL] rejecting {msg.source} ground observation expressed in "
+                f"{msg.header.frame_id!r}; this node maps in {self.map_frame!r}"
             )
-            return
-        try:
-            points = point_cloud2.read_points_numpy(
-                msg, field_names=("x", "y", "z"), skip_nans=True
-            )
-        except Exception as exc:  # malformed cloud
-            self.get_logger().warn(f"[WORLD_MODEL] unreadable point cloud: {exc}")
-            return
-        if points.size == 0:
-            return
-        # Rays that hit nothing come back at max range; those points are not
-        # evidence of anything and would smear fake free space across the map.
-        finite = np.isfinite(points).all(axis=1)
-        self.mapper.integrate(map_from_sensor.apply(points[finite]))
+            return True
+        return False
 
-    def _on_laser_scan(self, msg: LaserScan) -> None:
-        """Add newly encountered rover-height obstacles to the shared map."""
-        map_from_sensor, error = lookup_transform(
-            self.tf_buffer, self.map_frame, msg.header.frame_id, msg.header.stamp
-        )
-        if map_from_sensor is None:
+    def _on_mapping_observation(self, msg: GroundObservation) -> None:
+        """Fold one drone frame's floor geometry into the occupancy grid."""
+        if self._reject_foreign_frame(msg):
+            return
+        if not msg.usable:
+            self._rejected_frames += 1
             self.get_logger().warn(
-                f"[WORLD_MODEL] dropping rover lidar sweep: {error}",
+                f"[WORLD_MODEL] {msg.source} reported an unusable frame "
+                f"({msg.non_ground_fraction:.0%} not floor); {self._rejected_frames} total",
                 throttle_duration_sec=5.0,
             )
             return
-        points = planar_scan_hit_points(
-            msg.ranges,
-            angle_min=msg.angle_min,
-            angle_increment=msg.angle_increment,
-            range_min=msg.range_min,
-            range_max=msg.range_max,
+        self.mapper.integrate_ground_observation(
+            _points_to_array(msg.contacts), _points_to_array(msg.free_space)
         )
-        if points.size:
-            self.mapper.integrate_runtime_obstacle_hits(map_from_sensor.apply(points))
+
+    def _on_runtime_observation(self, msg: GroundObservation) -> None:
+        """Add obstacles the rover meets on a route the drone already mapped.
+
+        Only the contacts are taken. The rover's camera is 0.55 m off the
+        ground and looks along it, so its free-space estimate is far weaker
+        than the drone's - and the drone owns the map by design.
+        """
+        if self._reject_foreign_frame(msg) or not msg.usable:
+            return
+        contacts = _points_to_array(msg.contacts)
+        if contacts.size:
+            self.mapper.integrate_runtime_obstacle_hits(contacts)
 
     def _on_get_target(self, request, response):
         record = self.world_model.get_target(request.qr_id)

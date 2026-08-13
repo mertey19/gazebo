@@ -3,8 +3,9 @@
     ros2 launch mission_bringup mission.launch.py target_qr:=TARGET_2
 
 Brings up, in one shot: Gazebo with the arena world, the ros_gz bridges, the
-static TF tree, both QR detectors, the world model, the drone explorer, the
-rover path follower, the mission manager, and optionally RViz.
+static TF tree, both QR detectors, both monocular obstacle mappers, the world
+model, the drone explorer, the rover path follower, the mission manager, and
+optionally RViz.
 """
 
 from __future__ import annotations
@@ -54,10 +55,9 @@ DRONE_OPTICAL_QUAT = (
 FORWARD_OPTICAL_QUAT = ("0.5", "-0.5", "0.5", "-0.5")
 
 #: Sensor mount offsets; must equal the <pose> translations in the SDF models.
+#: One camera per vehicle is the complete sensor suite.
 DRONE_CAMERA_XYZ = ("0.10", "0.0", "-0.08")
-DRONE_LIDAR_XYZ = ("0.0", "0.0", "-0.06")
 ROVER_CAMERA_XYZ = ("0.22", "0.0", "0.55")
-ROVER_LIDAR_XYZ = ("0.24", "0.0", "0.30")
 
 #: Vehicle spawn poses; must equal the <pose> entries in mission_arena.sdf.
 DRONE_SPAWN_XY = ("-8.0", "-6.5")
@@ -188,16 +188,8 @@ def generate_launch_description() -> LaunchDescription:
             DRONE_CAMERA_XYZ, DRONE_OPTICAL_QUAT,
         ),
         _static_tf(
-            "drone_lidar", "drone/base_link", "drone/lidar_link",
-            DRONE_LIDAR_XYZ, ("0.0", "0.0", "0.0", "1.0"),
-        ),
-        _static_tf(
             "rover_camera_optical", "rover/base_link", "rover/camera_optical_frame",
             ROVER_CAMERA_XYZ, FORWARD_OPTICAL_QUAT,
-        ),
-        _static_tf(
-            "rover_lidar", "rover/base_link", "rover/lidar_link",
-            ROVER_LIDAR_XYZ, ("0.0", "0.0", "0.0", "1.0"),
         ),
     ]
 
@@ -232,6 +224,47 @@ def generate_launch_description() -> LaunchDescription:
                 "camera_info_topic": "/rover/camera/camera_info",
                 "observation_topic": "/perception/rover/qr_observations",
                 "camera_optical_frame": "rover/camera_optical_frame",
+            }
+        ],
+    )
+    # The obstacle mappers run on the very same image streams as the QR
+    # detectors above: one camera per vehicle is the whole sensor suite, so
+    # every metre of geometry in the occupancy grid comes out of these frames.
+    drone_obstacle_mapper = Node(
+        package="mission_nodes",
+        executable="visual_obstacle_node",
+        name="drone_obstacle_mapper",
+        output="screen",
+        parameters=common_params
+        + [
+            {
+                "camera_name": "drone",
+                "image_topic": "/drone/camera/image",
+                "camera_info_topic": "/drone/camera/camera_info",
+                "observation_topic": "/perception/drone/ground_observations",
+                "camera_optical_frame": "drone/camera_optical_frame",
+                # The drone escorts the rover from behind and would otherwise
+                # map it as an obstacle standing on its own route.
+                "self_filter_frames": ["rover/base_link"],
+            }
+        ],
+    )
+    rover_obstacle_mapper = Node(
+        package="mission_nodes",
+        executable="visual_obstacle_node",
+        name="rover_obstacle_mapper",
+        output="screen",
+        parameters=common_params
+        + [
+            {
+                "camera_name": "rover",
+                "image_topic": "/rover/camera/image",
+                "camera_info_topic": "/rover/camera/camera_info",
+                "observation_topic": "/perception/rover/ground_observations",
+                "camera_optical_frame": "rover/camera_optical_frame",
+                # Nothing to filter: the only other vehicle is above the
+                # rover's horizon, where no ground contact can be measured.
+                "self_filter_frames": [""],
             }
         ],
     )
@@ -288,6 +321,8 @@ def generate_launch_description() -> LaunchDescription:
             *static_transforms,
             drone_qr_detector,
             rover_qr_detector,
+            drone_obstacle_mapper,
+            rover_obstacle_mapper,
             world_model,
             drone_explorer,
             rover_follower,

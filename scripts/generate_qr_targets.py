@@ -186,7 +186,7 @@ def build_model_sdf(model_name: str, payload: str, plate_size: float) -> str:
         </material>
       </visual>
 
-      <!-- The station is a real obstacle: the drone's lidar must see it and
+      <!-- The station is a real obstacle: the drone must map it from its camera and
            the planner must route the rover around it. -->
       <collision name="core_collision">
         <pose>0 0 {cube_centre_z:.4f} 0 0 0</pose>

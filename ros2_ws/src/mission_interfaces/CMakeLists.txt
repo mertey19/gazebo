@@ -14,6 +14,7 @@ find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/QrObservation.msg"
+  "msg/GroundObservation.msg"
   "msg/TargetRecord.msg"
   "msg/TargetArray.msg"
   "msg/Obstacle.msg"

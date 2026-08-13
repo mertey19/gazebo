@@ -28,12 +28,19 @@ from .path_following import PurePursuitController, TrackingStatus
 from .planner import AStarPlanner, PlannedPath
 from .qr import QrDetection, QrDetector, render_qr_image
 from .validation import MissionValidator, ValidationReport
+from .vision_mapping import (
+    GroundObservation,
+    MonocularObstacleDetector,
+    segment_non_ground,
+)
 from .world_model import ObstacleRecord, TargetObservation, TargetRecord, TargetStatus, WorldModel
 
 __all__ = [
     "AStarPlanner",
     "FailureReason",
     "FlightPhase",
+    "GroundObservation",
+    "MonocularObstacleDetector",
     "MissionCommand",
     "MissionInputs",
     "MissionOrchestrator",
@@ -64,4 +71,5 @@ __all__ = [
     "lawnmower_waypoints",
     "load_mission_config",
     "render_qr_image",
+    "segment_non_ground",
 ]

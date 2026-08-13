@@ -4,9 +4,10 @@ Consumes ``nav_msgs/Path`` on ``/mission/rover_path`` - the path is *received*
 from the mission manager, never computed here - and drives the differential
 base along it with pure pursuit, publishing tracking diagnostics as it goes.
 
-Also runs a last-resort safety stop from the rover's own planar lidar.  That
-stop is a safety net, not the obstacle-avoidance strategy: avoidance happens in
-the planner, using the map the drone built.
+Also runs a last-resort safety stop from the rover's own camera - the obstacle
+bases ``visual_obstacle_node`` measures in the frames the rover is already
+streaming.  That stop is a safety net, not the obstacle-avoidance strategy:
+avoidance happens in the planner, using the map the drone built.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Trigger
 
 from mission_core.errors import FailureReason
@@ -31,6 +31,7 @@ from mission_core.path_following import (
     VerificationSweep,
 )
 
+from mission_interfaces.msg import GroundObservation
 from mission_interfaces.msg import TrackingStatus as TrackingStatusMsg
 
 from .common import (
@@ -55,7 +56,9 @@ class RoverPathFollowerNode(Node):
         self.declare_parameter("path_topic", "/mission/rover_path")
         self.declare_parameter("odometry_topic", "/rover/odometry")
         self.declare_parameter("cmd_vel_topic", "/rover/cmd_vel")
-        self.declare_parameter("scan_topic", "/rover/scan")
+        self.declare_parameter(
+            "ground_observation_topic", "/perception/rover/ground_observations"
+        )
         self.declare_parameter("status_topic", "/rover/tracking_status")
         self.declare_parameter("use_safety_stop", True)
 
@@ -117,7 +120,10 @@ class RoverPathFollowerNode(Node):
         )
         if bool(self.get_parameter("use_safety_stop").value):
             self.create_subscription(
-                LaserScan, str(self.get_parameter("scan_topic").value), self._on_scan, SENSOR_QOS
+                GroundObservation,
+                str(self.get_parameter("ground_observation_topic").value),
+                self._on_ground_observation,
+                DEFAULT_QOS,
             )
         self.create_service(Trigger, "~/stop", self._on_stop)
         self.create_service(Trigger, "~/search", self._on_search)
@@ -168,18 +174,17 @@ class RoverPathFollowerNode(Node):
             return
         self._pose = pose
 
-    def _on_scan(self, msg: LaserScan) -> None:
-        """Emergency stop when something is inside the safety radius ahead."""
-        ranges = np.asarray(msg.ranges, dtype=float)
-        if ranges.size == 0:
+    def _on_ground_observation(self, msg: GroundObservation) -> None:
+        """Emergency stop when an obstacle base is inside the safety radius.
+
+        The detector has already restricted the measurement to a forward wedge
+        - the rover cannot strafe, so an obstacle off to the side is not on a
+        collision course - and expressed it in the camera's own geometry, which
+        is what keeps this stop independent of the vehicle's localisation.
+        """
+        if not msg.usable:
             return
-        angles = msg.angle_min + np.arange(ranges.size) * msg.angle_increment
-        # Only a narrow forward wedge matters: the rover cannot strafe, so a
-        # return off to the side is not on a collision course.
-        forward = np.abs(angles) <= self.config.rover.obstacle_stop_half_angle_rad
-        valid = np.isfinite(ranges) & (ranges >= msg.range_min) & (ranges <= msg.range_max)
-        candidates = ranges[forward & valid]
-        self._min_forward_range = float(candidates.min()) if candidates.size else math.inf
+        self._min_forward_range = float(msg.nearest_forward_range_m)
         blocked = self._min_forward_range < self.config.rover.obstacle_stop_distance_m
         if blocked and not self._safety_blocked:
             self.get_logger().warn(
@@ -249,7 +254,7 @@ class RoverPathFollowerNode(Node):
                 progress_index=status.progress_index,
                 failure_reason=FailureReason.PATH_TRACKING_FAILURE,
                 detail=(
-                    f"safety lidar blocked forward motion for "
+                    f"the camera safety stop blocked forward motion for "
                     f"{self._safety_watchdog.blocked_s:.1f} s "
                     f"at {self._min_forward_range:.2f} m; requesting a replan"
                 ),

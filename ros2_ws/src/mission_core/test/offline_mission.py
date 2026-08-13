@@ -4,8 +4,11 @@ Wires the *production* mission_core components to the synthetic world in
 :mod:`sim_harness` and runs the complete flow:
 
     takeoff -> lawnmower scan -> camera frames -> QR decode + PnP -> TF into
-    map -> world model fusion -> lidar occupancy mapping -> A* -> path ->
+    map -> world model fusion -> monocular occupancy mapping -> A* -> path ->
     pure pursuit -> rover drives -> rover camera QR verification -> validator
+
+Each rendered drone frame is used twice, exactly as on the vehicle: once by the
+QR detector and once by the obstacle mapper.  There is no second sensor.
 
 Nothing here reads a ground-truth pose to make a decision; ground truth is only
 consulted afterwards, by the tests, to score how accurate perception was.
@@ -44,16 +47,22 @@ from mission_core.path_following import (
     PurePursuitController,
 )
 from mission_core.qr import QrDetector
+from mission_core.vision_mapping import MonocularObstacleDetector
 from mission_core.world_model import TargetObservation, WorldModel
 
-from sim_harness import SyntheticWorld, camera_pose_from_body, nadir_lidar_directions
+from sim_harness import SyntheticWorld, camera_pose_from_body
 
 #: Sensor mount offsets in each vehicle's ``base_link``.  These mirror the
 #: ``<pose>`` entries of the corresponding SDF sensors exactly; if one changes,
-#: the other must too.
+#: the other must too.  Two cameras, and nothing else.
 DRONE_CAMERA_MOUNT = (0.10, 0.0, -0.08)
-DRONE_LIDAR_MOUNT = (0.0, 0.0, -0.06)
 ROVER_CAMERA_MOUNT = (0.22, 0.0, 0.55)
+
+#: On the vehicle the rover's obstacle detector runs at the camera's own rate.
+#: The harness throttles it because rendering a second view of the scene at
+#: 6 Hz for every metre driven triples the cost of the offline suite without
+#: exercising a single additional branch.
+ROVER_VISION_RATE_HZ = 2.0
 
 
 @dataclass
@@ -140,10 +149,36 @@ class OfflineMissionRunner:
                 float(area_min[0]),
                 float(area_min[1]),
             ),
-            obstacle_min_height_m=config.world_model.obstacle_min_height_m,
-            obstacle_max_height_m=config.world_model.obstacle_max_height_m,
             min_hits=config.world_model.mapper_min_hits,
             hit_ratio_threshold=config.world_model.mapper_hit_ratio,
+        )
+        vision = config.vision
+        self.drone_obstacle_detector = MonocularObstacleDetector(
+            ground_z=vision.ground_z_m,
+            max_range_m=vision.drone_max_range_m,
+            min_obstacle_height_m=vision.min_obstacle_height_m,
+            max_obstacle_height_m=vision.max_obstacle_height_m,
+            column_stride=vision.column_stride_px,
+            free_stride=vision.free_stride_px,
+            chroma_sigma=vision.chroma_sigma,
+            bright_luma_margin=vision.bright_luma_margin,
+            min_blob_area_px=vision.min_blob_area_px,
+            downsample=vision.segmentation_downsample,
+            max_non_ground_fraction=vision.max_non_ground_fraction,
+        )
+        self.rover_obstacle_detector = MonocularObstacleDetector(
+            ground_z=vision.ground_z_m,
+            max_range_m=vision.rover_max_range_m,
+            min_obstacle_height_m=vision.min_obstacle_height_m,
+            max_obstacle_height_m=vision.max_obstacle_height_m,
+            column_stride=vision.column_stride_px,
+            free_stride=vision.free_stride_px,
+            forward_half_angle_rad=config.rover.obstacle_stop_half_angle_rad,
+            chroma_sigma=vision.chroma_sigma,
+            bright_luma_margin=vision.bright_luma_margin,
+            min_blob_area_px=vision.min_blob_area_px,
+            downsample=vision.segmentation_downsample,
+            max_non_ground_fraction=vision.max_non_ground_fraction,
         )
 
         self.drone = KinematicDrone(drone_start)
@@ -155,6 +190,7 @@ class OfflineMissionRunner:
                 config.drone.scan_altitude_m,
                 config.drone.lane_spacing_m,
                 config.drone.scan_margin_m,
+                config.mapping_near_edge_m(),
             ),
             scan_altitude_m=config.drone.scan_altitude_m,
             takeoff_speed_mps=config.drone.takeoff_speed_mps,
@@ -196,10 +232,13 @@ class OfflineMissionRunner:
             config, self.world_model, requested_qr=self.requested_qr
         )
 
-        self._lidar_directions = nadir_lidar_directions()
         self._perception_period = 1.0 / max(config.perception.qr_detection_rate_hz, 1e-3)
         self._last_perception_t = -math.inf
         self._last_map_publish_t = -math.inf
+        self._last_rover_vision_t = -math.inf
+        #: Nearest obstacle base the rover's own camera measured ahead of it.
+        self.rover_forward_range_m = math.inf
+        self.mapped_contacts = 0
         self._verification_hits: List[str] = []
         #: Most recent frame from each camera, kept so a recorder or a
         #: debugger can show exactly what the detector was looking at.
@@ -231,11 +270,16 @@ class OfflineMissionRunner:
         )
 
     def _observe_with_drone(self, now: float) -> None:
-        """Render one drone frame, decode it, and fold results into the model."""
+        """Render one drone frame, decode it, and fold results into the model.
+
+        The same image feeds the QR detector and the obstacle mapper, which is
+        the whole point: one camera, two consumers, no range sensor.
+        """
         pose = self._drone_camera_pose()
         image = self.world.render(pose, self.drone_camera)
         self._last_drone_frame = image
         self.trace.drone_frames += 1
+        self._map_with_drone_camera(image, pose)
         try:
             detections = self.detector.detect(image, self.drone_camera)
         except PerceptionError:
@@ -268,11 +312,39 @@ class OfflineMissionRunner:
                     f"range {detection.range_m:.2f} m"
                 )
 
-    def _scan_with_lidar(self) -> None:
-        origin = self.drone.position + np.asarray(DRONE_LIDAR_MOUNT)
-        points = self.world.raycast(origin, self._lidar_directions)
-        if len(points):
-            self.mapper.integrate(points)
+    def _map_with_drone_camera(self, image: np.ndarray, pose: Transform) -> None:
+        """Segment one drone frame into floor / not-floor and map the result."""
+        observation = self.drone_obstacle_detector.process(
+            image,
+            self.drone_camera,
+            pose,
+            # The rover is a real object correctly detected by a correct
+            # algorithm, and mapping it would block its own route.
+            exclude_centres_xy=np.array([self.rover.pose[:2]]),
+            exclude_radius_m=self.config.vision.self_filter_radius_m,
+        )
+        if not observation.usable:
+            return
+        self.mapped_contacts += observation.contact_count
+        self.mapper.integrate_ground_observation(observation.contacts, observation.free)
+
+    def _map_with_rover_camera(self) -> None:
+        """The rover's own view: local obstacle evidence plus the stop range.
+
+        This is the vision replacement for the planar safety lidar, and it is
+        the same code the drone runs - only the mounting and the trusted range
+        differ.
+        """
+        pose = self._rover_camera_pose()
+        image = self.world.render(pose, self.rover_camera)
+        self._last_rover_frame = image
+        self.trace.rover_frames += 1
+        observation = self.rover_obstacle_detector.process(image, self.rover_camera, pose)
+        if not observation.usable:
+            return
+        self.rover_forward_range_m = observation.nearest_forward_range_m
+        if observation.contact_count:
+            self.mapper.integrate_runtime_obstacle_hits(observation.contacts)
 
     def _refresh_occupancy(self) -> None:
         self.world_model.set_occupancy(self.mapper.build(), self.mapper.height_map)
@@ -352,7 +424,6 @@ class OfflineMissionRunner:
                     if now - self._last_perception_t >= self._perception_period:
                         self._last_perception_t = now
                         self._observe_with_drone(now)
-                        self._scan_with_lidar()
                     if now - self._last_map_publish_t >= 1.0 / max(
                         self.config.world_model.publish_rate_hz, 1e-3
                     ):
@@ -375,6 +446,12 @@ class OfflineMissionRunner:
                 else:
                     self.rover.step(status.linear_velocity, status.angular_velocity, self.dt)
                 self.trace.rover_track.append(self.rover.pose.copy())
+
+                # The rover's only obstacle sensor is the camera it verifies
+                # with; it runs while driving, not just on arrival.
+                if now - self._last_rover_vision_t >= 1.0 / ROVER_VISION_RATE_HZ:
+                    self._last_rover_vision_t = now
+                    self._map_with_rover_camera()
 
             # ---- rover camera verification
             if state is MissionState.VERIFYING_TARGET and verified_qr is None:

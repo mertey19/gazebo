@@ -53,14 +53,29 @@ def lawnmower_waypoints(
     altitude: float,
     lane_spacing: float,
     margin: float,
+    forward_offset: float = 0.0,
 ) -> np.ndarray:
     """Boustrophedon coverage pattern over the mission area.
 
-    Lane spacing must be smaller than the camera's ground footprint or the scan
+    Lane spacing must be smaller than the mapped ground swath or the scan
     leaves unobserved strips; :meth:`MissionConfig.validate` enforces that.
+
+    ``forward_offset`` shifts every lane *backwards* along the scan axis by the
+    distance between the vehicle and the nearest ground its camera can see.
+    The pattern has to cover the area the sensor sweeps, not the area the
+    vehicle overflies, and with a camera pitched down rather than a lidar
+    pointing down those are not the same region: the near edge of a depressed
+    camera's view is metres ahead of the aircraft, so an unshifted pattern
+    leaves the first stretch of every lane - and, at the corner of the arena,
+    the ground the rover is parked on - permanently unobserved.
+
+    This is only a translation because the scan holds a fixed heading (see
+    :class:`WaypointFlightController`); the camera always looks along +x, on
+    the return legs as much as the outbound ones.
     """
-    min_x = float(area_min[0]) + margin
-    max_x = float(area_max[0]) - margin
+    offset = float(forward_offset)
+    min_x = float(area_min[0]) + margin - offset
+    max_x = float(area_max[0]) - margin - offset
     min_y = float(area_min[1]) + margin
     max_y = float(area_max[1]) - margin
     if max_x <= min_x or max_y <= min_y:

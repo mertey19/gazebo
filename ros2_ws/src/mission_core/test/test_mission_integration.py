@@ -3,7 +3,7 @@
 Runs the *production* pipeline against the synthetic arena:
 
     takeoff -> lawnmower scan -> rendered camera frames -> cv2 QR decode ->
-    PnP -> TF into map -> world model fusion -> lidar occupancy mapping ->
+    PnP -> TF into map -> world model fusion -> monocular occupancy mapping ->
     A* -> nav_msgs-shaped path -> pure pursuit -> rover drives -> rover
     camera QR verification -> automated validator
 
@@ -193,7 +193,17 @@ def test_perception_positions_are_accurate(nominal_run) -> None:
     assert max(errors.values()) < 0.60, f"position errors: {errors}"
 
 
-def test_obstacles_are_mapped_from_lidar(nominal_run) -> None:
+def test_obstacles_are_mapped_from_camera_frames(nominal_run) -> None:
+    """Both walls are found, from RGB images and a ground plane alone.
+
+    What a camera can assert about a wall is different from what a lidar could,
+    and the difference is the point of these assertions. A camera measures the
+    line where an obstacle *meets the floor*; the volume behind that line is
+    occluded, so an obstacle's interior is legitimately never observed. The
+    requirement is therefore that the mapped rim exists, sits where the real
+    wall is, and that no part of the footprint is ever declared *free* - which
+    is what would let the planner route straight through it.
+    """
     _, trace = nominal_run
     obstacles = trace.world_model.obstacles()
     # Two walls plus the three stations, all of which are real obstacles.
@@ -201,10 +211,35 @@ def test_obstacles_are_mapped_from_lidar(nominal_run) -> None:
     grid = trace.world_model.occupancy
     assert grid is not None
     assert grid.known_fraction > 0.90, "the scan left large parts of the arena unmapped"
-    # The two walls must be present at their true footprints.
-    assert grid.value_at((0.0, -6.0)) == 100
-    assert grid.value_at((0.0, 0.0)) == 100
-    assert grid.value_at((-4.0, -3.0)) == 0
+
+    for centre, half_extent in (((0.0, -6.0), (3.0, 0.5)), ((0.0, 0.0), (0.5, 3.0))):
+        rim = [
+            grid.value_at(point) == 100
+            for point in _footprint_samples(centre, half_extent)
+        ]
+        # A third, not a half: the drone holds a fixed heading through the
+        # scan, so it only ever meets the faces pointing one way, and the
+        # far side of a wall is behind the near one.
+        assert sum(rim) >= len(rim) / 3.0, (
+            f"the wall at {centre} is barely mapped: only {sum(rim)}/{len(rim)} of its "
+            "footprint samples are occupied"
+        )
+        # Inflated by the clearance the planner uses, the whole footprint has
+        # to be blocked - occupied or unobserved, never open floor.
+        inflated = grid.inflate(0.55, unknown_is_obstacle=True)
+        assert all(
+            inflated.value_at(point) == 100
+            for point in _footprint_samples(centre, half_extent)
+        ), f"the planner would consider part of the wall at {centre} traversable"
+
+    assert grid.value_at((-4.0, -3.0)) == 0, "open floor must be mapped as free"
+
+
+def _footprint_samples(centre, half_extent):
+    """A grid of world points covering one rectangular obstacle footprint."""
+    xs = np.linspace(centre[0] - half_extent[0], centre[0] + half_extent[0], 9)
+    ys = np.linspace(centre[1] - half_extent[1], centre[1] + half_extent[1], 9)
+    return [(float(x), float(y)) for x in xs for y in ys]
 
 
 def test_path_is_a_genuine_obstacle_free_detour(nominal_run) -> None:
