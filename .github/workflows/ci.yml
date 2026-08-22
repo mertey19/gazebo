@@ -91,8 +91,7 @@ jobs:
           ros2 interface show mission_interfaces/srv/PlanPath > /dev/null
           ros2 interface show mission_interfaces/action/RunMission > /dev/null
           # Every node entry point must resolve.
-          for exe in qr_detector_node visual_obstacle_node world_model_node \
-                     drone_explorer_node mission_manager_node \n                     rover_path_follower_node twin_bridge_node; do
+          for exe in qr_detector_node visual_obstacle_node world_model_node drone_explorer_node mission_manager_node rover_path_follower_node twin_bridge_node; do
             test -x "$(ros2 pkg prefix mission_nodes)/lib/mission_nodes/$exe"
           done
           # And the launch file must at least parse and expand.
