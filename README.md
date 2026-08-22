@@ -22,7 +22,7 @@ has merely been written.
 
 | Layer | Status |
 |---|---|
-| `mission_core` algorithms (QR/PnP, monocular mapping, world model, occupancy, A*, pure pursuit, state machine, validator, ground-station feed) | **Executed.** 201 tests, including a full offline mission per target. |
+| `mission_core` algorithms (QR/PnP, monocular mapping, world model, occupancy, A*, pure pursuit, state machine, validator, ground-station feed) | **Executed.** 202 tests, including a full offline mission per target. |
 | Offline mission harness (renders real QR textures through a real pinhole camera, segments and back-projects those same frames, integrates unicycle kinematics) | **Executed.** Drives the production pipeline with zero simulator. Reproduce with `python scripts/run_offline_mission.py`. |
 | ROS 2 Jazzy layer (interfaces, nodes, launch) | **Executed.** `colcon build` + `colcon test`, interfaces introspectable, every node entry point installed, launch file expands. |
 | **Gazebo Harmonic, full mission** | **Executed.** `gazebo-e2e` launches the whole stack headless and blocks on the real mission verdict. A green workflow requires all three targets to succeed in three independent trials each. |
@@ -171,7 +171,7 @@ ros2_ws/src/
 │   │   ├── validation.py      the success criteria
 │   │   ├── vision_mapping.py  floor segmentation + ground-plane projection
 │   │   └── world_model.py     the digital twin
-│   └── test/                  201 tests, incl. sim_harness/offline_mission
+│   └── test/                  202 tests, incl. sim_harness/offline_mission
 ├── mission_interfaces/    10 msgs, 2 srvs, 1 action
 ├── mission_nodes/         7 rclpy nodes (thin adapters over mission_core)
 └── mission_bringup/       world, models, config, launch, rviz, frame checker
@@ -215,6 +215,17 @@ deviations away. Three properties follow, and each is pinned by a test in
   maps a phantom obstacle beside every real one; a chroma-based one does not.
   A second, deliberately one-sided lightness test catches achromatic obstacles
   such as a white QR plate, and cannot fire on a shadow, which is darker.
+  Measured on a frame Gazebo really rendered, in Lab units of chroma distance
+  from the floor's own median — a cast shadow is as far from the floor as the
+  floor is, while every obstacle is several times further:
+
+  | arena floor | cast shadow | station cube | wall, shaded | wall, lit | wall, far |
+  |---|---|---|---|---|---|
+  | 1.1 | 1.1 | 3.6 | 4.2 | 7.0 | 7.6 |
+
+  In *brightness* that same shadow (L 97 against the floor's 191) is further
+  from the floor than either wall. That frame is committed as a test fixture,
+  because it is the one input the offline renderer only approximates.
 * **the sky is not a wall standing at the horizon.** The vanishing line of the
   ground plane follows from the camera pose alone, and everything above it is
   excluded from both the answer and the statistics. On the rover — whose camera
@@ -507,7 +518,7 @@ for PnP cannot drift apart.
 No ROS installation required — `mission_core` is deliberately ROS-free:
 
 ```bash
-python -m pytest                          # everything (201 tests, ~7 min)
+python -m pytest                          # everything (202 tests, ~7 min)
 python -m pytest -m "not integration"     # fast unit tests only (~3 s)
 python -m pytest -m integration -v        # full end-to-end mission runs
 ```

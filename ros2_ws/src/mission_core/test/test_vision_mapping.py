@@ -11,7 +11,9 @@ obstacles.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -323,3 +325,56 @@ def test_a_stale_floor_reference_is_eventually_discarded(drone_camera) -> None:
     assert recovered.usable
     assert recovered.non_ground_fraction < 0.05
     assert recovered.contact_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Against a frame Gazebo actually rendered
+# ---------------------------------------------------------------------------
+
+GAZEBO_FRAME = Path(__file__).resolve().parent / "data" / "gazebo_drone_frame.png"
+
+
+def test_the_segmenter_works_on_a_frame_gazebo_actually_rendered() -> None:
+    """The one input the offline renderer only approximates.
+
+    This frame came out of a real ``gazebo-e2e`` run: Ogre lighting, ambient
+    fill, cast shadows, the arena's own materials. It is here because those
+    materials are far closer together than any synthetic scene suggests, and
+    the first camera-only build read the whole arena as floor because of it:
+    ``0 contacts, 3084 free samples``, an occupancy grid with nothing in it,
+    and a mission that could not plan around obstacles it had never seen.
+
+    The numbers behind the threshold, measured on this frame, in Lab units of
+    chroma distance from the floor's own median:
+
+        arena floor      1.1        obstacle wall, lit     7.0
+        cast shadow      1.1        obstacle wall, far     7.6
+                                    obstacle wall, shaded  4.2
+                                    station cube           3.6
+
+    A cast shadow is as close to the floor as the floor is - which is the whole
+    argument for measuring chroma rather than brightness, since in *brightness*
+    that shadow is further from the floor (L 97 vs 191) than either wall.
+    """
+    frame = cv2.imread(str(GAZEBO_FRAME))
+    assert frame is not None, f"missing test fixture: {GAZEBO_FRAME}"
+    mask, fraction, model = segment_non_ground(frame)
+
+    assert model is not None
+    # Two walls and a station in a frame that is mostly open floor.
+    assert 0.05 < fraction < 0.40, f"{fraction:.1%} of the frame flagged"
+
+    flagged = {
+        "obstacle wall, lit": (600, 1050),
+        "obstacle wall, far left": (770, 40),
+        "station cube": (280, 675),
+    }
+    for name, (row, col) in flagged.items():
+        assert mask[row, col], f"{name} was read as floor"
+
+    clear = {
+        "open floor": (450, 250),
+        "floor in cast shadow": (660, 730),
+    }
+    for name, (row, col) in clear.items():
+        assert not mask[row, col], f"{name} was read as an obstacle"

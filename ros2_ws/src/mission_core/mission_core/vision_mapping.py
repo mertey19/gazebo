@@ -60,7 +60,11 @@ class FloorModel:
     """
 
     chroma_median: np.ndarray
-    chroma_scale: np.ndarray
+    #: Robust spread of the floor's own chroma *distance*, in Lab units. On a
+    #: real surface this is what sets the sensitivity; on a simulator's flat
+    #: material it collapses to nearly zero, which is why the threshold also
+    #: has an absolute floor.
+    chroma_spread: float
     luma_median: float
 
     def blended_with(self, other: "FloorModel", weight: float) -> "FloorModel":
@@ -73,7 +77,7 @@ class FloorModel:
         weight = float(np.clip(weight, 0.0, 1.0))
         return FloorModel(
             chroma_median=(1.0 - weight) * self.chroma_median + weight * other.chroma_median,
-            chroma_scale=(1.0 - weight) * self.chroma_scale + weight * other.chroma_scale,
+            chroma_spread=(1.0 - weight) * self.chroma_spread + weight * other.chroma_spread,
             luma_median=(1.0 - weight) * self.luma_median + weight * other.luma_median,
         )
 
@@ -139,7 +143,7 @@ def segment_non_ground(
     region: Optional[np.ndarray] = None,
     model: Optional[FloorModel] = None,
     chroma_sigma: float = 3.5,
-    chroma_scale_floor: float = 2.0,
+    min_chroma_distance: float = 3.0,
     bright_luma_margin: float = 40.0,
     min_blob_area_px: float = 200.0,
     downsample: int = 2,
@@ -214,18 +218,25 @@ def segment_non_ground(
     sample = (chroma if small_region is None else chroma[small_region]).reshape(-1, 2)
     luma_sample = luma if small_region is None else luma[small_region]
     median = np.median(sample, axis=0)
-    # A perfectly uniform floor has a MAD of zero, which would make every pixel
-    # infinitely deviant. The floor on the scale is what keeps the test finite
-    # and is expressed in Lab units, so it means the same thing on any frame.
-    scale = np.maximum(
-        _MAD_TO_SIGMA * np.median(np.abs(sample - median), axis=0), float(chroma_scale_floor)
+    # Distance in the (a, b) plane, not the larger of the two channels. A
+    # surface differs from the floor in both at once - a Gazebo obstacle sits
+    # 4 units away in a and 6.6 in b - and taking the maximum throws away the
+    # combination that makes it distinguishable.
+    sample_distance = np.linalg.norm(sample - median, axis=1)
+    spread = _MAD_TO_SIGMA * float(
+        np.median(np.abs(sample_distance - np.median(sample_distance)))
     )
-    measured = FloorModel(median, scale, float(np.median(luma_sample)))
+    measured = FloorModel(median, spread, float(np.median(luma_sample)))
 
     reference = model or measured
-    mask = np.max(np.abs(chroma - reference.chroma_median) / reference.chroma_scale, axis=2) > float(
-        chroma_sigma
+    # Two thresholds, and the larger wins. The robust one adapts to a surface
+    # with real texture; the absolute one is what works on a simulator's
+    # perfectly flat material, where the robust spread collapses to nothing and
+    # a purely relative test either fires on everything or on nothing.
+    threshold = max(
+        float(chroma_sigma) * reference.chroma_spread, float(min_chroma_distance)
     )
+    mask = np.linalg.norm(chroma - reference.chroma_median, axis=2) > threshold
     mask |= (luma - reference.luma_median) > float(bright_luma_margin)
     if small_region is not None:
         mask &= small_region
@@ -311,6 +322,7 @@ class MonocularObstacleDetector:
         free_stride: int = 16,
         forward_half_angle_rad: float = 0.35,
         chroma_sigma: float = 3.5,
+        min_chroma_distance: float = 3.0,
         bright_luma_margin: float = 40.0,
         min_blob_area_px: float = 200.0,
         downsample: int = 2,
@@ -335,6 +347,7 @@ class MonocularObstacleDetector:
         self.free_stride = int(free_stride)
         self.forward_half_angle_rad = float(forward_half_angle_rad)
         self.chroma_sigma = float(chroma_sigma)
+        self.min_chroma_distance = float(min_chroma_distance)
         self.bright_luma_margin = float(bright_luma_margin)
         self.min_blob_area_px = float(min_blob_area_px)
         self.downsample = int(downsample)
@@ -370,6 +383,7 @@ class MonocularObstacleDetector:
             region=region,
             model=self.floor_model,
             chroma_sigma=self.chroma_sigma,
+            min_chroma_distance=self.min_chroma_distance,
             bright_luma_margin=self.bright_luma_margin,
             min_blob_area_px=self.min_blob_area_px,
             downsample=self.downsample,

@@ -232,6 +232,12 @@ class VisionConfig:
     #: How many robust deviations of chroma from the floor's own colour make a
     #: pixel non-ground.
     chroma_sigma: float = 3.5
+    #: Absolute Lab-distance floor for that test. Measured on a real Gazebo
+    #: frame: the arena floor scatters 1.1 units about its own median, a cast
+    #: shadow 1.1, while an obstacle wall sits 7.0-7.6 away and a station cube
+    #: 3.6. A simulator's materials are perfectly flat, so the robust spread
+    #: collapses and this is the number that actually decides.
+    min_chroma_distance: float = 3.0
     #: Extra Lab lightness (0-255) above the floor that marks an achromatic
     #: obstacle. One-sided on purpose: shadows are darker, never brighter.
     bright_luma_margin: float = 40.0

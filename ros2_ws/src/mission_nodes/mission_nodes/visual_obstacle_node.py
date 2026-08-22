@@ -83,6 +83,7 @@ class VisualObstacleNode(Node):
             free_stride=vision.free_stride_px,
             forward_half_angle_rad=float(self.get_parameter("forward_half_angle_rad").value),
             chroma_sigma=vision.chroma_sigma,
+            min_chroma_distance=vision.min_chroma_distance,
             bright_luma_margin=vision.bright_luma_margin,
             min_blob_area_px=vision.min_blob_area_px,
             downsample=vision.segmentation_downsample,

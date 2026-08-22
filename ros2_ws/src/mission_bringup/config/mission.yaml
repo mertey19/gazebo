@@ -149,6 +149,10 @@ vision:
   # Robust deviations of Lab chroma from the floor's own colour. Chroma rather
   # than brightness, so shadows - which keep the floor's hue - are not walls.
   chroma_sigma: 3.5
+  # ...and an absolute Lab-distance floor, which is what decides on a
+  # simulator's perfectly flat materials. Measured on a real Gazebo frame:
+  # floor scatter 1.1, cast shadow 1.1, obstacle wall 7.0-7.6, station cube 3.6.
+  min_chroma_distance: 3.0
   # One-sided lightness test for achromatic obstacles such as a white QR
   # plate. Shadows are darker than the floor, so they can never trip it.
   bright_luma_margin: 40.0
