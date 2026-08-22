@@ -9,6 +9,7 @@ Each node is a thin adapter around ``mission_core``:
 ``drone_explorer_node``      lawnmower coverage flight for the scout UAV
 ``mission_manager_node``     mission state machine, planning, path transmission
 ``rover_path_follower_node`` follows the received nav_msgs/Path
+``twin_bridge_node``         forwards mission state to the ground station
 ===========================  ==============================================
 
 The two perception nodes run on the same image stream: a vehicle's single

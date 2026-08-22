@@ -163,6 +163,37 @@ class PerceptionConfig:
 
 
 @dataclass(frozen=True)
+class GroundStationConfig:
+    """Feed for the Simurgh digital-twin ground station.
+
+    The station already understands this mission - phases, target and obstacle
+    deltas, decoded QR content, route waypoints - so the bridge is a translator
+    and nothing here changes what the robots do. Disabled by default: a mission
+    must not depend on an operator console being reachable.
+    """
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    #: DigitalTwinUdpIngress listens here; its ACKs come back on port + 1.
+    port: int = 19090
+    #: Where the map frame's origin sits on Earth. This is the one value that
+    #: has to be told the truth about the physical site.
+    anchor_latitude: float = 39.868_0
+    anchor_longitude: float = 32.735_0
+    anchor_altitude_m: float = 850.0
+    #: Optional shared secret, when the station has token checking on.
+    auth_token: str = ""
+    source_id: str = "gazebo-mission"
+    publish_rate_hz: float = 5.0
+    #: Newly occupied cells per message. The station applies them as upserts,
+    #: so the map fills in progressively instead of arriving all at once.
+    voxel_batch: int = 200
+    send_voxels: bool = True
+    #: One JSON object per datagram; larger payloads are split.
+    max_datagram_bytes: int = 60000
+
+
+@dataclass(frozen=True)
 class WorldModelConfig:
     association_radius_m: float = 1.5
     min_observations: int = 3
@@ -210,6 +241,11 @@ class VisionConfig:
     #: A frame with more non-floor than this does not get to say what the
     #: floor looks like; until some frame has, nothing is mapped at all.
     max_non_ground_fraction: float = 0.35
+    #: The way back from a bad reference. When this share of the view reads as
+    #: not-floor for this many frames running, the reference is more likely
+    #: wrong than the world is solid, and it is discarded and re-learned.
+    stale_model_fraction: float = 0.9
+    stale_model_frames: int = 8
     #: Contacts this close to another vehicle are that vehicle. The drone flies
     #: escort behind the rover, so without this the rover is mapped as an
     #: obstacle standing on its own route.
@@ -272,6 +308,7 @@ class MissionConfig:
     rover: RoverConfig = field(default_factory=RoverConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
+    ground_station: GroundStationConfig = field(default_factory=GroundStationConfig)
     world_model: WorldModelConfig = field(default_factory=WorldModelConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
@@ -419,6 +456,24 @@ class MissionConfig:
             problems.append("vision.segmentation_downsample must be at least 1")
         if self.vision.column_stride_px < 1 or self.vision.free_stride_px < 1:
             problems.append("vision pixel strides must be at least 1")
+        station = self.ground_station
+        if station.enabled:
+            if not -90.0 <= station.anchor_latitude <= 90.0:
+                problems.append("ground_station.anchor_latitude must lie in [-90, 90]")
+            if not -180.0 <= station.anchor_longitude <= 180.0:
+                problems.append("ground_station.anchor_longitude must lie in [-180, 180]")
+            if not 0 < station.port < 65536:
+                problems.append("ground_station.port must be a valid UDP port")
+            if station.publish_rate_hz <= 0.0:
+                problems.append("ground_station.publish_rate_hz must be positive")
+            if station.voxel_batch < 1:
+                problems.append("ground_station.voxel_batch must be at least 1")
+            # A datagram larger than this is fragmented by IP and lost whole if
+            # any fragment is; the station reads one JSON object per packet.
+            if not 1024 <= station.max_datagram_bytes <= 65000:
+                problems.append(
+                    "ground_station.max_datagram_bytes must lie between 1024 and 65000"
+                )
 
         if self.planner.planning_resolution_m > self.planner.rover_radius_m:
             problems.append(

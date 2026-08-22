@@ -165,6 +165,8 @@ class OfflineMissionRunner:
             min_blob_area_px=vision.min_blob_area_px,
             downsample=vision.segmentation_downsample,
             max_non_ground_fraction=vision.max_non_ground_fraction,
+            stale_model_fraction=vision.stale_model_fraction,
+            stale_model_frames=vision.stale_model_frames,
         )
         self.rover_obstacle_detector = MonocularObstacleDetector(
             ground_z=vision.ground_z_m,
@@ -179,6 +181,8 @@ class OfflineMissionRunner:
             min_blob_area_px=vision.min_blob_area_px,
             downsample=vision.segmentation_downsample,
             max_non_ground_fraction=vision.max_non_ground_fraction,
+            stale_model_fraction=vision.stale_model_fraction,
+            stale_model_frames=vision.stale_model_frames,
         )
 
         self.drone = KinematicDrone(drone_start)

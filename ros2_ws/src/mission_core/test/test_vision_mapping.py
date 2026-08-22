@@ -261,3 +261,65 @@ def test_a_rendered_wall_is_mapped_where_it_actually_stands(drone_camera) -> Non
     assert 1.5 - 0.15 <= height <= 2.1, f"measured height {height:.2f} m"
     # Nothing may be mapped in front of the wall: that is where the rover drives.
     assert np.all(contacts[:, 1] <= -3.5)
+
+
+# ---------------------------------------------------------------------------
+# The floor reference: how it is established, and how it is escaped
+# ---------------------------------------------------------------------------
+
+def test_a_camera_below_the_floor_never_defines_the_floor(drone_camera) -> None:
+    """Regression, found in Gazebo: the drone sits on its pad at z = 0.06 m and
+    its camera is mounted 0.08 m *below* base_link, so before take-off the
+    camera is 2 cm under the ground plane. No pixel can be floor, the usable
+    region is empty - and the segmenter used to answer that with a fabricated
+    reference of pure black. Every frame of the flight that followed deviated
+    from it, so the whole arena read as obstacle: `100% not floor, 0 free
+    samples`, a map 10% observed and 28 phantom obstacles.
+    """
+    detector = MonocularObstacleDetector()
+    on_the_pad = camera_pose_from_body(
+        (-8.0, -6.5, 0.06), 0.0, (0.10, 0.0, -0.08),
+        optical_from_depression(DEPRESSION),
+    )
+    assert on_the_pad.translation[2] < 0.0, "this test is only meaningful below the plane"
+
+    observation = detector.process(flat_floor(drone_camera), drone_camera, on_the_pad)
+    assert not observation.usable
+    assert detector.floor_model is None, "an empty view must not define the floor"
+
+    # ...and once airborne the very next frame establishes it normally.
+    airborne = detector.process(
+        flat_floor(drone_camera), drone_camera, drone_pose((-8.0, -6.5, 4.0))
+    )
+    assert airborne.usable and detector.floor_model is not None
+
+
+def test_a_stale_floor_reference_is_eventually_discarded(drone_camera) -> None:
+    """A reference that can never change is one that can be wrong forever.
+
+    Whatever the cause - a bad first frame, a lighting change, driving onto a
+    different surface - a mapper that reports "nothing here is floor" frame
+    after frame is far more likely to be holding a wrong reference than to be
+    looking at a world made entirely of obstacle.
+    """
+    detector = MonocularObstacleDetector(stale_model_frames=3)
+    pose = drone_pose((0.0, 0.0, 4.0))
+    green = flat_floor(drone_camera)
+    assert detector.process(green, drone_camera, pose).usable
+    assert detector.floor_model is not None
+
+    # The floor is now a completely different colour - the reference is stale.
+    magenta = np.full_like(green, (200, 40, 200))
+    for _ in range(2):
+        observation = detector.process(magenta, drone_camera, pose)
+        assert observation.non_ground_fraction > 0.9
+    assert detector.floor_model is not None, "one odd frame must not reset it"
+
+    detector.process(magenta, drone_camera, pose)
+    assert detector.floor_model is None and detector.model_resets == 1
+
+    # Re-learned from the next frame, and the world is floor again.
+    recovered = detector.process(magenta, drone_camera, pose)
+    assert recovered.usable
+    assert recovered.non_ground_fraction < 0.05
+    assert recovered.contact_count == 0

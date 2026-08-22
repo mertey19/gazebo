@@ -160,9 +160,36 @@ vision:
   # background. Afterwards a frame like that is still used - a camera filled by
   # a wall is a close wall, which is exactly what must not be dropped.
   max_non_ground_fraction: 0.35
+  # Bad references must not be permanent: if this share of the view reads as
+  # not-floor for this many frames running, the reference is more likely wrong
+  # than the world solid, so it is thrown away and re-learned.
+  stale_model_fraction: 0.9
+  stale_model_frames: 8
   # The drone escorts the rover from behind and sees it clearly. Without this
   # the rover would be mapped as an obstacle standing on its own route.
   self_filter_radius_m: 1.0
+
+# Simurgh digital-twin yer istasyonu feed. The station already speaks this
+# mission's language (scan/joint_operation/dynamic_replan/complete phases,
+# target and obstacle upsert deltas, decoded QR content), so twin_bridge_node
+# is a translator - it changes nothing about what the robots do. Off by
+# default: a mission must not depend on an operator console being reachable.
+ground_station:
+  enabled: false
+  host: "127.0.0.1"
+  port: 19090
+  # UNVERIFIED placeholder - Hacettepe Beytepe. Set this to the real arena
+  # position before a demo, or every track on the map will be in the wrong
+  # place while looking perfectly plausible.
+  anchor_latitude: 39.8680
+  anchor_longitude: 32.7350
+  anchor_altitude_m: 850.0
+  auth_token: ""
+  source_id: "gazebo-mission"
+  publish_rate_hz: 5.0
+  voxel_batch: 200
+  send_voxels: true
+  max_datagram_bytes: 60000
 
 world_model:
   association_radius_m: 1.5

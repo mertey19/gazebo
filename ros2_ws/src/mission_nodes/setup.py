@@ -25,6 +25,7 @@ setup(
             "drone_explorer_node = mission_nodes.drone_explorer_node:main",
             "mission_manager_node = mission_nodes.mission_manager_node:main",
             "rover_path_follower_node = mission_nodes.rover_path_follower_node:main",
+            "twin_bridge_node = mission_nodes.twin_bridge_node:main",
         ],
     },
 )

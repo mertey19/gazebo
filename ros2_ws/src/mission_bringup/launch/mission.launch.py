@@ -59,6 +59,10 @@ FORWARD_OPTICAL_QUAT = ("0.5", "-0.5", "0.5", "-0.5")
 DRONE_CAMERA_XYZ = ("0.10", "0.0", "-0.08")
 ROVER_CAMERA_XYZ = ("0.22", "0.0", "0.55")
 
+#: Mirrors vision.rover_max_range_m: the rover mapper must not inherit the
+#: drone's trusted range, which is measured from four metres up.
+ROVER_VISION_RANGE_M = 6.0
+
 #: Vehicle spawn poses; must equal the <pose> entries in mission_arena.sdf.
 DRONE_SPAWN_XY = ("-8.0", "-6.5")
 ROVER_SPAWN_XY = ("-8.0", "-8.0")
@@ -89,6 +93,7 @@ def generate_launch_description() -> LaunchDescription:
     config_file = LaunchConfiguration("config_file")
     world = LaunchConfiguration("world")
     use_rviz = LaunchConfiguration("rviz")
+    ground_station = LaunchConfiguration("ground_station")
     headless = LaunchConfiguration("headless")
     auto_start = LaunchConfiguration("auto_start")
 
@@ -102,6 +107,18 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("world", default_value=default_world),
         DeclareLaunchArgument(
             "rviz", default_value="false", description="Start RViz2 for debugging."
+        ),
+        DeclareLaunchArgument(
+            "ground_station",
+            default_value="false",
+            description=(
+                "Stream the mission to the Simurgh digital-twin ground station over "
+                "UDP. Off by default: the mission must not depend on an operator "
+                "console being reachable. Set the arena's real position in "
+                "config/mission.yaml (ground_station.anchor_latitude/longitude) "
+                "before switching it on, or every track lands somewhere plausible "
+                "and wrong."
+            ),
         ),
         DeclareLaunchArgument(
             "headless",
@@ -262,6 +279,9 @@ def generate_launch_description() -> LaunchDescription:
                 "camera_info_topic": "/rover/camera/camera_info",
                 "observation_topic": "/perception/rover/ground_observations",
                 "camera_optical_frame": "rover/camera_optical_frame",
+                # The rover only has to see far enough to stop; the drone's
+                # 10 m is measured from four metres up, not from 0.55 m.
+                "max_range_m": ROVER_VISION_RANGE_M,
                 # Nothing to filter: the only other vehicle is above the
                 # rover's horizon, where no ground contact can be measured.
                 "self_filter_frames": [""],
@@ -299,6 +319,18 @@ def generate_launch_description() -> LaunchDescription:
         parameters=common_params + [{"target_qr": target_qr}, {"auto_start": auto_start}],
     )
 
+    # Read-only by construction: it subscribes and sends UDP, publishes no
+    # topic and offers no service, so a station that disappears mid-mission
+    # cannot affect the mission.
+    twin_bridge = Node(
+        package="mission_nodes",
+        executable="twin_bridge_node",
+        name="twin_bridge",
+        output="screen",
+        parameters=common_params + [{"ground_station.enabled": True}],
+        condition=IfCondition(ground_station),
+    )
+
     rviz = Node(
         package="rviz2",
         executable="rviz2",
@@ -327,6 +359,7 @@ def generate_launch_description() -> LaunchDescription:
             drone_explorer,
             rover_follower,
             mission_manager,
+            twin_bridge,
             rviz,
         ]
     )

@@ -143,7 +143,7 @@ def segment_non_ground(
     bright_luma_margin: float = 40.0,
     min_blob_area_px: float = 200.0,
     downsample: int = 2,
-) -> Tuple[np.ndarray, float, FloorModel]:
+) -> Tuple[np.ndarray, float, Optional[FloorModel]]:
     """Label the pixels that are *not* the arena floor.
 
     The floor is not described by a hardcoded colour - that would be a prior
@@ -168,7 +168,10 @@ def segment_non_ground(
 
     Returns the full-resolution boolean mask, the fraction of the region it
     covers, and the floor model *measured from this frame* - which the caller
-    can carry forward whether or not it was the one used here.
+    can carry forward whether or not it was the one used here.  That model is
+    ``None`` when this frame had nothing to measure: a frame with no usable
+    region says nothing about the floor's colour, and inventing a placeholder
+    for it poisons every frame that follows.
     """
     if image is None or image.size == 0:
         raise ValueError("cannot segment an empty image")
@@ -196,11 +199,13 @@ def segment_non_ground(
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
         if not small_region.any():
-            return (
-                np.zeros((height, width), dtype=bool),
-                0.0,
-                model or FloorModel(np.zeros(2), np.full(2, chroma_scale_floor), 0.0),
-            )
+            # No pixel in this frame can be floor, so there is nothing to
+            # measure and nothing to say. Returning a fabricated model here is
+            # how a drone still sitting on its pad - camera below the ground
+            # plane, region empty - once defined the floor as pure black and
+            # then classified the entire arena as obstacle for the rest of the
+            # flight.
+            return np.zeros((height, width), dtype=bool), 0.0, None
 
     lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
     luma = lab[:, :, 0].astype(np.float32)
@@ -311,6 +316,8 @@ class MonocularObstacleDetector:
         downsample: int = 2,
         max_non_ground_fraction: float = 0.35,
         model_blend: float = 0.15,
+        stale_model_fraction: float = 0.9,
+        stale_model_frames: int = 8,
     ) -> None:
         if max_range_m <= 0.0:
             raise ValueError("max_range_m must be positive")
@@ -333,8 +340,14 @@ class MonocularObstacleDetector:
         self.downsample = int(downsample)
         self.max_non_ground_fraction = float(max_non_ground_fraction)
         self.model_blend = float(model_blend)
+        self.stale_model_fraction = float(stale_model_fraction)
+        self.stale_model_frames = int(stale_model_frames)
         #: Floor reference, learned from frames the floor demonstrably owns.
         self.floor_model: Optional[FloorModel] = None
+        self._starved_frames = 0
+        #: How many times the reference was discarded as stale. A healthy run
+        #: leaves this at zero; anything else is worth a look in the logs.
+        self.model_resets = 0
 
     # -- segmentation ------------------------------------------------------
     def segment(
@@ -346,6 +359,11 @@ class MonocularObstacleDetector:
         comfortably dominant, so a vehicle that drives up to a wall keeps
         measuring against the floor it came from instead of adopting the wall
         as the new definition of "background".
+
+        A reference that is never allowed to change is a reference that can be
+        wrong forever, so there is one way back: when frame after frame reports
+        that virtually nothing is floor, the more likely explanation is a bad
+        reference than a world made entirely of obstacle, and it is discarded.
         """
         mask, fraction, measured = segment_non_ground(
             image,
@@ -356,12 +374,26 @@ class MonocularObstacleDetector:
             min_blob_area_px=self.min_blob_area_px,
             downsample=self.downsample,
         )
-        if fraction <= self.max_non_ground_fraction:
+        if measured is not None and fraction <= self.max_non_ground_fraction:
             self.floor_model = (
                 measured
                 if self.floor_model is None
                 else self.floor_model.blended_with(measured, self.model_blend)
             )
+            self._starved_frames = 0
+            return mask, fraction
+
+        if self.floor_model is not None and fraction >= self.stale_model_fraction:
+            self._starved_frames += 1
+            if self._starved_frames >= self.stale_model_frames:
+                self.floor_model = None
+                self._starved_frames = 0
+                self.model_resets += 1
+                # This frame was read against the reference now being thrown
+                # away, so its mask is not evidence of anything.
+                return np.zeros(mask.shape, dtype=bool), fraction
+        elif fraction < self.stale_model_fraction:
+            self._starved_frames = 0
         return mask, fraction
 
     # -- projection --------------------------------------------------------

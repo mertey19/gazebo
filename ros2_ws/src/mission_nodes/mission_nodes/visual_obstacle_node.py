@@ -87,6 +87,8 @@ class VisualObstacleNode(Node):
             min_blob_area_px=vision.min_blob_area_px,
             downsample=vision.segmentation_downsample,
             max_non_ground_fraction=vision.max_non_ground_fraction,
+            stale_model_fraction=vision.stale_model_fraction,
+            stale_model_frames=vision.stale_model_frames,
         )
         self.bridge = CvBridge()
         self.camera: Optional[PinholeCamera] = None

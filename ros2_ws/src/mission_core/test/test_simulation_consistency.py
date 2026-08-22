@@ -532,6 +532,7 @@ def test_launch_file_starts_every_mission_node() -> None:
         "drone_explorer_node",
         "rover_path_follower_node",
         "mission_manager_node",
+        "twin_bridge_node",
     ):
         assert executable in text, f"{executable} is never launched"
     # Two instances of each perception node: one per camera.
@@ -775,4 +776,70 @@ def test_lane_spacing_is_covered_by_the_mapped_swath(config) -> None:
     assert config.mapping_swath_m() < config.camera_ground_footprint_m(), (
         "the swath at the near edge must be the binding constraint, not the "
         "wider one measured out at the station plates"
+    )
+
+
+def test_no_node_reads_an_attribute_it_never_assigns() -> None:
+    """Catch the typo class of bug that only a running ROS node would reveal.
+
+    Nothing in this suite can import the nodes - rclpy is not installed on the
+    development host - so a ``self.something`` that is read but never assigned
+    survives every test here, survives ``colcon build``, and then raises
+    ``AttributeError`` on the first message the node receives. That is a long
+    way to travel for a typo, and it happened: ``twin_bridge_node`` read
+    ``self.map_frame`` in its odometry callback without ever setting it.
+
+    Only *value* reads are checked. ``self.create_subscription(...)`` and the
+    rest of the rclpy API are calls into the base class and are none of this
+    test's business; state is what a node owns and must define.
+    """
+    offenders: List[str] = []
+    for source in sorted(NODES_DIR.glob("*_node.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            assigned = {
+                item.name
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            called: set = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                    targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+                    for target in targets:
+                        for leaf in ast.walk(target):
+                            if _is_self_attribute(leaf):
+                                assigned.add(leaf.attr)
+                if isinstance(sub, ast.Call):
+                    # setattr(self, "name", value) is still an assignment.
+                    if (
+                        isinstance(sub.func, ast.Name)
+                        and sub.func.id == "setattr"
+                        and len(sub.args) >= 2
+                        and isinstance(sub.args[1], ast.Constant)
+                    ):
+                        assigned.add(sub.args[1].value)
+                    if _is_self_attribute(sub.func):
+                        called.add(sub.func.attr)
+            for sub in ast.walk(node):
+                if not _is_self_attribute(sub) or not isinstance(sub.ctx, ast.Load):
+                    continue
+                attr = sub.attr
+                if attr in assigned or attr in called or attr.startswith("__"):
+                    continue
+                offenders.append(f"{source.name}: {node.name}.{attr}")
+
+    assert not offenders, (
+        "these node attributes are read but never assigned, which is an "
+        f"AttributeError on the first message: {sorted(set(offenders))}"
+    )
+
+
+def _is_self_attribute(node) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
     )

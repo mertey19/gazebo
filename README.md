@@ -22,7 +22,7 @@ has merely been written.
 
 | Layer | Status |
 |---|---|
-| `mission_core` algorithms (QR/PnP, monocular mapping, world model, occupancy, A*, pure pursuit, state machine, validator) | **Executed.** 181 tests, including a full offline mission per target. |
+| `mission_core` algorithms (QR/PnP, monocular mapping, world model, occupancy, A*, pure pursuit, state machine, validator, ground-station feed) | **Executed.** 201 tests, including a full offline mission per target. |
 | Offline mission harness (renders real QR textures through a real pinhole camera, segments and back-projects those same frames, integrates unicycle kinematics) | **Executed.** Drives the production pipeline with zero simulator. Reproduce with `python scripts/run_offline_mission.py`. |
 | ROS 2 Jazzy layer (interfaces, nodes, launch) | **Executed.** `colcon build` + `colcon test`, interfaces introspectable, every node entry point installed, launch file expands. |
 | **Gazebo Harmonic, full mission** | **Executed.** `gazebo-e2e` launches the whole stack headless and blocks on the real mission verdict. A green workflow requires all three targets to succeed in three independent trials each. |
@@ -167,12 +167,13 @@ ros2_ws/src/
 │   │   ├── path_following.py  pure pursuit + unicycle model
 │   │   ├── planner.py         A*, shortcutting, approach-pose selection
 │   │   ├── qr.py              decode + PnP marker pose
+│   │   ├── twin_telemetry.py  ground-station message building
 │   │   ├── validation.py      the success criteria
 │   │   ├── vision_mapping.py  floor segmentation + ground-plane projection
 │   │   └── world_model.py     the digital twin
-│   └── test/                  181 tests, incl. sim_harness/offline_mission
+│   └── test/                  201 tests, incl. sim_harness/offline_mission
 ├── mission_interfaces/    10 msgs, 2 srvs, 1 action
-├── mission_nodes/         6 rclpy nodes (thin adapters over mission_core)
+├── mission_nodes/         7 rclpy nodes (thin adapters over mission_core)
 └── mission_bringup/       world, models, config, launch, rviz, frame checker
 scripts/generate_qr_targets.py   generates the station models from mission.yaml
 ```
@@ -320,6 +321,10 @@ continues silently past a critical failure.
 | **`/mission/rover_path`** | **`nav_msgs/Path`** | `mission_manager` | latched |
 | `/mission/status` | `mission_interfaces/MissionStatus` | `mission_manager` | latched |
 
+Nothing publishes a "travelled path" topic. The ground station lengthens each
+vehicle's trail from successive pose messages itself, and RViz keeps its own
+history, so a trail topic would only duplicate state its consumers already hold.
+
 Latched = `TRANSIENT_LOCAL` + `RELIABLE`, so a tool started mid-mission still
 receives the current map, path and state.
 
@@ -369,6 +374,67 @@ map
 Camera optical frames follow REP-103: x right, y down, z forward. QR poses come
 out of `solvePnP` in the optical frame and are transformed to `map` with a
 single TF lookup — there are no corrective offsets anywhere in the codebase.
+
+---
+
+## 5.1 Ground station
+
+The mission streams to the [Simurgh digital-twin ground
+station](https://github.com/mertey19/groundstation) — Unity + Mapbox, with a
+mission engine that already understands this exact scenario. **Nothing on the
+station side changes.** It speaks a JSON dialect over UDP whose vocabulary maps
+onto the mission one-to-one:
+
+| Station field | Source |
+|---|---|
+| `pose` (`uav` / `rover`) | `/drone/odometry`, `/rover/odometry`, through TF into `map` |
+| `missionPhase` | `/mission/status` → `scan` / `joint_operation` / `dynamic_replan` / `complete` |
+| `route.waypoints` | `/mission/rover_path` |
+| `targets[]` | `/world_model/targets` — `decodedContent` is the payload the rover read, `reached` whether it is verified |
+| `obstacles[]` | `/world_model/obstacles` |
+| `voxelCells[]` | `/world_model/occupancy_grid`, occupied cells only |
+| `imagery.imageBase64` | the rover's own frame of the code it verified, for the station's QR gallery |
+
+`twin_bridge_node` is the translator, and it is read-only by construction: it
+subscribes and sends UDP, publishes no topic, offers no service and touches no
+vehicle, so a ground station that disappears mid-mission cannot affect the
+mission.
+
+```bash
+ros2 launch mission_bringup mission.launch.py ground_station:=true
+```
+
+Two properties are worth stating because they are what make the display
+*correct* rather than merely populated:
+
+* **Everything is a delta.** A 110 × 110 grid is 12 100 cells; sending it whole
+  at the world model's rate would saturate a field link. Only what changed is
+  sent, as `upsert` — which is also why targets and obstacles appear on the
+  operator's map exactly as the drone discovers them, with no extra machinery.
+* **Retractions are sent too.** Occupancy is evidence, and evidence can be
+  withdrawn: a cell that later fails the hit-ratio test, or an obstacle whose
+  connected component merged into another, is `remove`d. Without that the map
+  only ever grows — one arena scan put thirteen obstacles on the station's map
+  for a world model that held seven.
+
+### Without ROS, without Gazebo
+
+The same messages can be produced from the offline harness, which makes the
+ground station demonstrable on a machine that has neither:
+
+```bash
+python scripts/stream_mission_to_ground_station.py --host 127.0.0.1
+```
+
+It flies a complete mission and sends the same `DigitalTwinMessageV1` stream
+`twin_bridge_node` sends — same builder, same schema, same deltas. `--speed 2`
+plays at twice real time, `--speed 0` as fast as the mission computes.
+
+> **Set the anchor before a demo.** The mission plans in local ENU metres and
+> the station plots on a globe, so `ground_station.anchor_latitude/longitude`
+> place the `map` origin on the Earth. The shipped value is a **placeholder**
+> (Hacettepe Beytepe); leave it wrong and every track lands somewhere entirely
+> plausible and entirely incorrect.
 
 ---
 
@@ -441,7 +507,7 @@ for PnP cannot drift apart.
 No ROS installation required — `mission_core` is deliberately ROS-free:
 
 ```bash
-python -m pytest                          # everything (181 tests, ~6 min)
+python -m pytest                          # everything (201 tests, ~7 min)
 python -m pytest -m "not integration"     # fast unit tests only (~3 s)
 python -m pytest -m integration -v        # full end-to-end mission runs
 ```
@@ -462,6 +528,7 @@ cd ros2_ws && colcon test --packages-select mission_core && colcon test-result -
 | `test_mission_integration.py` | TEST 6 — full mission per target, plus end-to-end failures |
 | `test_path_following.py` | controller limits, watchdog, goal capture |
 | `test_config.py` | YAML/code agreement, startup sanity checks |
+| `test_twin_telemetry.py` | TEST 8 — the ground-station feed against the station's own C# contract: geography, phases, deltas, retractions, datagram limits |
 | `test_simulation_consistency.py` | SDF vs YAML vs launch TF vs harness — the closest thing to a Gazebo check that runs without Gazebo |
 
 To watch one mission run end to end with a full log, a perception-accuracy
